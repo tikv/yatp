@@ -4,4 +4,4 @@
 
 mod runner;
 
-pub use self::runner::{Runner, LocalSpawn, RemoteSpawn};
+pub use self::runner::{LocalSpawn, RemoteSpawn, Runner};

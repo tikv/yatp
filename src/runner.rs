@@ -28,7 +28,7 @@ pub trait Runner {
 
     /// Called when the runner is started.
     ///
-    /// It's guaranteed to be the first method to called before anything else.
+    /// It's guaranteed to be the first method to call before anything else.
     fn start(&mut self, _spawn: &mut Self::Spawn) {}
 
     /// Called when a task needs to be handled.
