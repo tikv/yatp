@@ -1,8 +1,8 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-/// In Yatp model, any pieces of logic aims to be executed in thread pool is
-/// called Task. There can be different definitions of Task. Some people may
-/// choose `Future` as Task, some may just want callbacks, or even Actor
+/// In the model of yatp, any piece of logic aiming to be executed in a thread
+/// pool is called Task. There can be different definitions of Task. Some people
+/// may choose `Future` as Task, some may just want callbacks, or even Actor
 /// messages. But no matter what a Task is, there should be some role know how
 /// to execute it. The role is call `Runner`.
 ///
@@ -52,14 +52,14 @@ pub trait Runner {
     fn end(&mut self, _spawn: &mut Self::Spawn) {}
 }
 
-/// Allows spawn a task to the thread pool from a different thread.
+/// Allows spawning a task to the thread pool from a different thread.
 pub trait RemoteSpawn: Sync + Send {
     type Task;
 
     fn spawn(&self, t: impl Into<Self::Task>);
 }
 
-/// Allows spawn a task inside the thread pool.
+/// Allows spawning a task inside the thread pool.
 pub trait LocalSpawn {
     type Task;
     type Remote: RemoteSpawn;
