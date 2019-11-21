@@ -1,0 +1,11 @@
+[package]
+name = "yatp"
+version = "0.0.1"
+authors = ["The TiKV Authors"]
+edition = "2018"
+description = ""
+readme = "README.md"
+license = "Apache-2.0"
+repository = "https://github.com/tikv/yatp/"
+
+[dependencies]
