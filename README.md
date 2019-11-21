@@ -1,2 +1,2 @@
-# tikv-threadpool
-An adaptive threadpool in rust for both callbacks or futures.
+# yatp
+Yet another thread pool in Rust that is adaptive, responsive and generic.
