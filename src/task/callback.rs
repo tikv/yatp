@@ -6,32 +6,24 @@ use crate::LocalSpawn;
 
 use std::marker::PhantomData;
 
-/// Tasks that is supported by [`Runner`].
-///
-/// Anything that can be converted to a [`Task`] is supported by [`Runner`].
-pub trait CallbackTask<Spawn> {
-    /// Performs the conversion to a callback task.
-    fn as_mut_task(&mut self) -> &mut Task<Spawn>;
-}
-
-impl<Spawn> CallbackTask<Spawn> for Task<Spawn> {
-    fn as_mut_task(&mut self) -> &mut Task<Spawn> {
-        self
-    }
-}
-
 /// A callback task, which is either a [`FnOnce`] or a [`FnMut`].
-pub enum Task<Spawn> {
+pub enum Task<Spawn>
+where
+    Spawn: LocalSpawn,
+{
     /// A [`FnOnce`] task.
-    Once(Option<Box<dyn FnOnce(&mut Handle<'_, Spawn>) + Send>>),
+    Once(Box<dyn FnOnce(&mut Handle<'_, Spawn>) + Send>),
     /// A [`FnMut`] task.
     Mut(Box<dyn FnMut(&mut Handle<'_, Spawn>) + Send>),
 }
 
-impl<Spawn> Task<Spawn> {
+impl<Spawn> Task<Spawn>
+where
+    Spawn: LocalSpawn,
+{
     /// Creates a [`FnOnce`] task.
     pub fn new_once(t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static) -> Self {
-        Task::Once(Some(Box::new(t)))
+        Task::Once(Box::new(t))
     }
 
     /// Creates a [`FnMut`] task.
@@ -44,8 +36,12 @@ impl<Spawn> Task<Spawn> {
 ///
 /// It can be used to spawn new tasks or control whether this task should be
 /// rerun.
-pub struct Handle<'a, Spawn> {
+pub struct Handle<'a, Spawn>
+where
+    Spawn: LocalSpawn,
+{
     spawn: &'a mut Spawn,
+    ctx: &'a Spawn::TaskContext,
     rerun: bool,
 }
 
@@ -53,14 +49,37 @@ impl<'a, Spawn> Handle<'a, Spawn>
 where
     Spawn: LocalSpawn<Task = Task<Spawn>>,
 {
-    /// Spawns a [`FnOnce`] to the thread pool.
+    /// Spawns a [`FnOnce`] to the thread pool with the same task context.
     pub fn spawn_once(&mut self, t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static) {
-        self.spawn.spawn(Task::new_once(t));
+        self.spawn.spawn_ctx(Task::new_once(t), self.ctx);
     }
 
-    /// Spawns a [`FnMut`] to the thread pool.
+    /// Spawns a [`FnMut`] to the thread pool with the same task context.
     pub fn spawn_mut(&mut self, t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static) {
-        self.spawn.spawn(Task::new_mut(t));
+        self.spawn.spawn_ctx(Task::new_mut(t), self.ctx);
+    }
+
+    /// Spawns a [`FnOnce`] to the thread pool with the given task context.
+    pub fn spawn_once_ctx(
+        &mut self,
+        t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static,
+        ctx: &Spawn::TaskContext,
+    ) {
+        self.spawn.spawn_ctx(Task::new_once(t), ctx);
+    }
+
+    /// Spawns a [`FnMut`] to the thread pool with the given task context.
+    pub fn spawn_mut_ctx(
+        &mut self,
+        t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static,
+        ctx: &Spawn::TaskContext,
+    ) {
+        self.spawn.spawn_ctx(Task::new_mut(t), ctx);
+    }
+
+    /// Gets the task context.
+    pub fn context(&self) -> &Spawn::TaskContext {
+        &self.ctx
     }
 
     /// Sets whether this task should be rerun later.
@@ -103,20 +122,25 @@ impl<Spawn> Default for Runner<Spawn> {
     }
 }
 
-impl<Spawn, T> crate::Runner for Runner<Spawn>
+impl<Spawn> crate::Runner for Runner<Spawn>
 where
-    Spawn: LocalSpawn<Task = T>,
-    T: CallbackTask<Spawn>,
+    Spawn: LocalSpawn<Task = Task<Spawn>>,
 {
-    type Task = T;
+    type Task = Task<Spawn>;
     type Spawn = Spawn;
 
-    fn handle(&mut self, spawn: &mut Spawn, mut task: T) -> bool {
+    fn handle(
+        &mut self,
+        spawn: &mut Spawn,
+        mut task: Task<Spawn>,
+        ctx: &<Self::Spawn as LocalSpawn>::TaskContext,
+    ) -> bool {
         let mut handle = Handle {
             spawn,
+            ctx,
             rerun: false,
         };
-        match task.as_mut_task() {
+        match task {
             Task::Mut(ref mut r) => {
                 let mut tried_times = 0;
                 loop {
@@ -131,12 +155,12 @@ where
                     handle.rerun = false;
                 }
             }
-            Task::Once(ref mut r) => {
-                r.take().expect("Once task is called more than once.")(&mut handle);
+            Task::Once(r) => {
+                r(&mut handle);
                 return true;
             }
         }
-        spawn.spawn(task);
+        spawn.spawn_ctx(task, ctx);
         false
     }
 }
@@ -155,13 +179,13 @@ mod tests {
 
     impl LocalSpawn for MockSpawn {
         type Task = Task<MockSpawn>;
+        type TaskContext = ();
         type Remote = MockSpawn;
 
-        fn spawn(&mut self, _: impl Into<Self::Task>) {
+        fn spawn_ctx(&mut self, _t: impl Into<Self::Task>, _ctx: &()) {
             self.spawn_times += 1;
         }
 
-        /// Gets a remote instance to allow spawn task back to the pool.
         fn remote(&self) -> Self::Remote {
             unimplemented!()
         }
@@ -169,8 +193,9 @@ mod tests {
 
     impl RemoteSpawn for MockSpawn {
         type Task = Task<MockSpawn>;
+        type SpawnOption = ();
 
-        fn spawn(&self, _: impl Into<Self::Task>) {
+        fn spawn_opt(&self, _t: impl Into<Self::Task>, _opt: &()) {
             unimplemented!()
         }
     }
@@ -185,6 +210,7 @@ mod tests {
             Task::new_once(move |_| {
                 tx.send(42).unwrap();
             }),
+            &(),
         );
         assert_eq!(rx.recv().unwrap(), 42);
     }
@@ -205,6 +231,7 @@ mod tests {
                     handle.set_rerun(true);
                 }
             }),
+            &(),
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
@@ -228,6 +255,7 @@ mod tests {
                     handle.set_rerun(true);
                 }
             }),
+            &(),
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
