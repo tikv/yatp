@@ -4,4 +4,6 @@
 
 mod runner;
 
+pub mod task;
+
 pub use self::runner::{LocalSpawn, RemoteSpawn, Runner};
