@@ -107,7 +107,7 @@ impl<Spawn> Runner<Spawn> {
         }
     }
 
-    ///  Sets `max_inplace_spin`.
+    /// Sets `max_inplace_spin`.
     pub fn set_max_inplace_spin(&mut self, max_inplace_spin: usize) {
         self.max_inplace_spin = max_inplace_spin;
     }
@@ -116,7 +116,7 @@ impl<Spawn> Runner<Spawn> {
 impl<Spawn> Default for Runner<Spawn> {
     fn default() -> Self {
         Runner {
-            max_inplace_spin: 4,
+            max_inplace_spin: 3,
             _phantom: PhantomData,
         }
     }
@@ -142,16 +142,16 @@ where
         };
         match task {
             Task::Mut(ref mut r) => {
-                let mut tried_times = 0;
+                let mut rerun_times = 0;
                 loop {
                     r(&mut handle);
                     if !handle.rerun {
                         return true;
                     }
-                    tried_times += 1;
-                    if tried_times == self.max_inplace_spin {
+                    if rerun_times >= self.max_inplace_spin {
                         break;
                     }
+                    rerun_times += 1;
                     handle.rerun = false;
                 }
             }
@@ -216,8 +216,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mut_no_spin() {
-        let mut runner = Runner::new(2);
+    fn test_mut_no_respawn() {
+        let mut runner = Runner::new(1);
         let mut spawn = MockSpawn::default();
         let (tx, rx) = mpsc::channel();
 
@@ -240,8 +240,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mut_spin() {
-        let mut runner = Runner::new(2);
+    fn test_mut_respawn() {
+        let mut runner = Runner::new(1);
         let mut spawn = MockSpawn::default();
         let (tx, rx) = mpsc::channel();
 
