@@ -7,20 +7,14 @@ use crate::LocalSpawn;
 use std::marker::PhantomData;
 
 /// A callback task, which is either a [`FnOnce`] or a [`FnMut`].
-pub enum Task<Spawn>
-where
-    Spawn: LocalSpawn,
-{
+pub enum Task<Spawn: LocalSpawn> {
     /// A [`FnOnce`] task.
     Once(Box<dyn FnOnce(&mut Handle<'_, Spawn>) + Send>),
     /// A [`FnMut`] task.
     Mut(Box<dyn FnMut(&mut Handle<'_, Spawn>) + Send>),
 }
 
-impl<Spawn> Task<Spawn>
-where
-    Spawn: LocalSpawn,
-{
+impl<Spawn: LocalSpawn> Task<Spawn> {
     /// Creates a [`FnOnce`] task.
     pub fn new_once(t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static) -> Self {
         Task::Once(Box::new(t))
@@ -168,7 +162,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RemoteSpawn, Runner as _};
+    use crate::{RemoteSpawn, RemoteTask, Runner as _};
 
     use std::sync::mpsc;
 
@@ -191,11 +185,17 @@ mod tests {
         }
     }
 
+    impl RemoteTask<()> for Task<MockSpawn> {
+        fn spawn_options(&self) -> &() {
+            &()
+        }
+    }
+
     impl RemoteSpawn for MockSpawn {
         type Task = Task<MockSpawn>;
-        type SpawnOption = ();
+        type SpawnOptions = ();
 
-        fn spawn_opt(&self, _t: impl Into<Self::Task>, _opt: &()) {
+        fn spawn(&self, _task: impl Into<Task<MockSpawn>>) {
             unimplemented!()
         }
     }

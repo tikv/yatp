@@ -57,28 +57,22 @@ pub trait Runner {
     fn end(&mut self, _spawn: &mut Self::Spawn) {}
 }
 
+/// A task which can be spawned by [`RemoteSpawn`]. It must contain necessary spawn options.
+pub trait RemoteTask<SpawnOptions> {
+    /// Gets the spawn options.
+    fn spawn_options(&self) -> &SpawnOptions;
+}
+
 /// Allows spawning a task to the thread pool from a different thread.
 pub trait RemoteSpawn: Sync + Send {
     /// The task it can spawn.
-    type Task;
-    /// The spawn option.
-    type SpawnOption;
+    type Task: RemoteTask<Self::SpawnOptions>;
+    /// The spawn options.
+    type SpawnOptions;
 
-    /// Spawns a task into the thread pool.
-    fn spawn_opt(&self, t: impl Into<Self::Task>, opt: &Self::SpawnOption);
+    /// Spawns a task cell into the thread pool.
+    fn spawn(&self, task: impl Into<Self::Task>);
 }
-
-/// Extentions to `[RemoteSpawn]`.
-pub trait RemoteSpawnExt: RemoteSpawn {
-    fn spawn(&self, t: impl Into<Self::Task>)
-    where
-        Self::SpawnOption: Default,
-    {
-        self.spawn_opt(t, &Default::default())
-    }
-}
-
-impl<S: RemoteSpawn> RemoteSpawnExt for S {}
 
 /// Allows spawning a task inside the thread pool.
 pub trait LocalSpawn {
@@ -87,10 +81,10 @@ pub trait LocalSpawn {
     /// The context that associated with the task.
     type TaskContext;
     /// The remote handle that can be used in other threads.
-    type Remote: RemoteSpawn<Task = Self::Task>;
+    type Remote: RemoteSpawn;
 
     /// Spawns a task into the thread pool.
-    fn spawn_ctx(&mut self, t: impl Into<Self::Task>, ctx: &Self::TaskContext);
+    fn spawn_ctx(&mut self, task: impl Into<Self::Task>, ctx: &Self::TaskContext);
 
     /// Gets a remote instance to allow spawn task back to the pool.
     fn remote(&self) -> Self::Remote;
