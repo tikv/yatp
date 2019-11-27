@@ -1,5 +1,19 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+/// A cell containing a task and needed extra information.
+pub trait TaskCell {
+    /// Extra information in the cell.
+    type Extras;
+
+    /// Gets mutable extra information.
+    ///
+    /// # Safety
+    ///
+    /// This method is not safe. The caller must ensure that he is the only
+    /// one accessing the extras.
+    unsafe fn mut_extras(&mut self) -> &mut Self::Extras;
+}
+
 /// A Task queue for thread pool.
 ///
 /// Unlike a general MPMC queues, it's not required to be `Sync` on the
@@ -8,7 +22,7 @@
 /// data struct.
 pub trait TaskQueue: Clone {
     type Consumer;
-    type TaskCell;
+    type TaskCell: TaskCell;
 
     /// Creates a queue with a promise to only use at most `con` consumers
     /// at the same time.
