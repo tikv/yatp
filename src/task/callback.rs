@@ -5,6 +5,7 @@
 use crate::LocalSpawn;
 
 use std::marker::PhantomData;
+use std::time::Instant;
 
 /// A callback task, which is either a [`FnOnce`] or a [`FnMut`].
 pub enum Task<Spawn> {
@@ -32,6 +33,19 @@ pub struct TaskCell<Spawn, Options> {
     pub task: Task<Spawn>,
     /// Extra information about the task.
     pub options: Options,
+    /// The instant when the task is scheduled.
+    pub schedule_instant: Instant,
+}
+
+impl<Spawn, Options> TaskCell<Spawn, Options> {
+    /// Creates a new callback task cell, with its schedule instant set to now.
+    pub fn new(task: Task<Spawn>, options: Options) -> Self {
+        Self {
+            task,
+            options,
+            schedule_instant: Instant::now(),
+        }
+    }
 }
 
 /// Handle passed to the task closure.
@@ -53,10 +67,7 @@ where
         t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static,
         options: Options,
     ) {
-        self.spawn.spawn(TaskCell {
-            task: Task::new_once(t),
-            options,
-        });
+        self.spawn.spawn(TaskCell::new(Task::new_once(t), options));
     }
 
     /// Spawns a [`FnMut`] to the thread pool.
@@ -65,10 +76,7 @@ where
         t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static,
         options: Options,
     ) {
-        self.spawn.spawn(TaskCell {
-            task: Task::new_mut(t),
-            options,
-        });
+        self.spawn.spawn(TaskCell::new(Task::new_mut(t), options));
     }
 
     /// Sets whether this task should be rerun later.
@@ -187,12 +195,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         runner.handle(
             &mut spawn,
-            TaskCell {
-                task: Task::new_once(move |_| {
+            TaskCell::new(
+                Task::new_once(move |_| {
                     tx.send(42).unwrap();
                 }),
-                options: (),
-            },
+                (),
+            ),
         );
         assert_eq!(rx.recv().unwrap(), 42);
     }
@@ -206,16 +214,16 @@ mod tests {
         let mut times = 0;
         runner.handle(
             &mut spawn,
-            TaskCell {
-                task: Task::new_mut(move |handle| {
+            TaskCell::new(
+                Task::new_mut(move |handle| {
                     tx.send(42).unwrap();
                     times += 1;
                     if times < 2 {
                         handle.set_rerun(true);
                     }
                 }),
-                options: (),
-            },
+                (),
+            ),
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
@@ -232,16 +240,16 @@ mod tests {
         let mut times = 0;
         runner.handle(
             &mut spawn,
-            TaskCell {
-                task: Task::new_mut(move |handle| {
+            TaskCell::new(
+                Task::new_mut(move |handle| {
                     tx.send(42).unwrap();
                     times += 1;
                     if times < 3 {
                         handle.set_rerun(true);
                     }
                 }),
-                options: (),
-            },
+                (),
+            ),
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
