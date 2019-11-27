@@ -37,7 +37,7 @@ pub struct TaskCell<Spawn, Extras> {
 impl<Spawn, Extras> crate::queue::TaskCell for TaskCell<Spawn, Extras> {
     type Extras = Extras;
 
-    unsafe fn mut_extras(&mut self) -> &mut Self::Extras {
+    fn mut_extras(&mut self) -> &mut Self::Extras {
         &mut self.extras
     }
 }

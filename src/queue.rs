@@ -6,12 +6,7 @@ pub trait TaskCell {
     type Extras;
 
     /// Gets mutable extra information.
-    ///
-    /// # Safety
-    ///
-    /// This method is not safe. The caller must ensure that he is the only
-    /// one accessing the extras.
-    unsafe fn mut_extras(&mut self) -> &mut Self::Extras;
+    fn mut_extras(&mut self) -> &mut Self::Extras;
 }
 
 /// A Task queue for thread pool.
