@@ -36,12 +36,7 @@ pub trait Runner {
     /// It's possible that a task can't be finished in a single execution, in
     /// which case feel free to spawn the task again and return false to
     /// indicate the task has not been finished yet.
-    fn handle(
-        &mut self,
-        spawn: &mut Self::Spawn,
-        task: Self::Task,
-        ctx: &<Self::Spawn as LocalSpawn>::TaskContext,
-    ) -> bool;
+    fn handle(&mut self, spawn: &mut Self::Spawn, task: Self::Task) -> bool;
 
     /// Called when the runner is put to sleep.
     fn pause(&mut self, _spawn: &mut Self::Spawn) -> bool {
@@ -78,30 +73,15 @@ pub trait RemoteSpawn: Sync + Send {
 pub trait LocalSpawn {
     /// The task it can spawn.
     type Task;
-    /// The context that associated with the task.
-    type TaskContext;
     /// The remote handle that can be used in other threads.
     type Remote: RemoteSpawn;
 
     /// Spawns a task into the thread pool.
-    fn spawn_ctx(&mut self, task: impl Into<Self::Task>, ctx: &Self::TaskContext);
+    fn spawn(&mut self, task: impl Into<Self::Task>);
 
     /// Gets a remote instance to allow spawn task back to the pool.
     fn remote(&self) -> Self::Remote;
 }
-
-/// Extensions to `[LocalSpawn]`.
-pub trait LocalSpawnExt: LocalSpawn {
-    /// Spawns a task into the thread pool.
-    fn spawn(&mut self, t: impl Into<Self::Task>)
-    where
-        Self::TaskContext: Default,
-    {
-        self.spawn_ctx(t, &Default::default())
-    }
-}
-
-impl<S: LocalSpawn> LocalSpawnExt for S {}
 
 /// A builder trait that produce `Runner`.
 pub trait RunnerBuilder {

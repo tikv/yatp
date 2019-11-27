@@ -7,14 +7,14 @@ use crate::LocalSpawn;
 use std::marker::PhantomData;
 
 /// A callback task, which is either a [`FnOnce`] or a [`FnMut`].
-pub enum Task<Spawn: LocalSpawn> {
+pub enum Task<Spawn> {
     /// A [`FnOnce`] task.
     Once(Box<dyn FnOnce(&mut Handle<'_, Spawn>) + Send>),
     /// A [`FnMut`] task.
     Mut(Box<dyn FnMut(&mut Handle<'_, Spawn>) + Send>),
 }
 
-impl<Spawn: LocalSpawn> Task<Spawn> {
+impl<Spawn> Task<Spawn> {
     /// Creates a [`FnOnce`] task.
     pub fn new_once(t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static) -> Self {
         Task::Once(Box::new(t))
@@ -30,12 +30,8 @@ impl<Spawn: LocalSpawn> Task<Spawn> {
 ///
 /// It can be used to spawn new tasks or control whether this task should be
 /// rerun.
-pub struct Handle<'a, Spawn>
-where
-    Spawn: LocalSpawn,
-{
+pub struct Handle<'a, Spawn> {
     spawn: &'a mut Spawn,
-    ctx: &'a Spawn::TaskContext,
     rerun: bool,
 }
 
@@ -43,37 +39,14 @@ impl<'a, Spawn> Handle<'a, Spawn>
 where
     Spawn: LocalSpawn<Task = Task<Spawn>>,
 {
-    /// Spawns a [`FnOnce`] to the thread pool with the same task context.
+    /// Spawns a [`FnOnce`] to the thread pool.
     pub fn spawn_once(&mut self, t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static) {
-        self.spawn.spawn_ctx(Task::new_once(t), self.ctx);
+        self.spawn.spawn(Task::new_once(t));
     }
 
-    /// Spawns a [`FnMut`] to the thread pool with the same task context.
+    /// Spawns a [`FnMut`] to the thread pool.
     pub fn spawn_mut(&mut self, t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static) {
-        self.spawn.spawn_ctx(Task::new_mut(t), self.ctx);
-    }
-
-    /// Spawns a [`FnOnce`] to the thread pool with the given task context.
-    pub fn spawn_once_ctx(
-        &mut self,
-        t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static,
-        ctx: &Spawn::TaskContext,
-    ) {
-        self.spawn.spawn_ctx(Task::new_once(t), ctx);
-    }
-
-    /// Spawns a [`FnMut`] to the thread pool with the given task context.
-    pub fn spawn_mut_ctx(
-        &mut self,
-        t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static,
-        ctx: &Spawn::TaskContext,
-    ) {
-        self.spawn.spawn_ctx(Task::new_mut(t), ctx);
-    }
-
-    /// Gets the task context.
-    pub fn context(&self) -> &Spawn::TaskContext {
-        &self.ctx
+        self.spawn.spawn(Task::new_mut(t));
     }
 
     /// Sets whether this task should be rerun later.
@@ -123,15 +96,9 @@ where
     type Task = Task<Spawn>;
     type Spawn = Spawn;
 
-    fn handle(
-        &mut self,
-        spawn: &mut Spawn,
-        mut task: Task<Spawn>,
-        ctx: &<Self::Spawn as LocalSpawn>::TaskContext,
-    ) -> bool {
+    fn handle(&mut self, spawn: &mut Spawn, mut task: Task<Spawn>) -> bool {
         let mut handle = Handle {
             spawn,
-            ctx,
             rerun: false,
         };
         match task {
@@ -154,7 +121,7 @@ where
                 return true;
             }
         }
-        spawn.spawn_ctx(task, ctx);
+        spawn.spawn(task);
         false
     }
 }
@@ -173,10 +140,9 @@ mod tests {
 
     impl LocalSpawn for MockSpawn {
         type Task = Task<MockSpawn>;
-        type TaskContext = ();
         type Remote = MockSpawn;
 
-        fn spawn_ctx(&mut self, _t: impl Into<Self::Task>, _ctx: &()) {
+        fn spawn(&mut self, _t: impl Into<Self::Task>) {
             self.spawn_times += 1;
         }
 
@@ -210,7 +176,6 @@ mod tests {
             Task::new_once(move |_| {
                 tx.send(42).unwrap();
             }),
-            &(),
         );
         assert_eq!(rx.recv().unwrap(), 42);
     }
@@ -231,7 +196,6 @@ mod tests {
                     handle.set_rerun(true);
                 }
             }),
-            &(),
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
@@ -255,7 +219,6 @@ mod tests {
                     handle.set_rerun(true);
                 }
             }),
-            &(),
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
