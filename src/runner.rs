@@ -20,11 +20,8 @@
 /// Generally users should use the provided future thread pool or callback
 /// thread pool instead. This is only for advance customization.
 pub trait Runner {
-    /// The task runner can handle.
-    type Task;
-
     /// The local spawn that can be accepted to spawn tasks.
-    type Spawn: LocalSpawn<Task = Self::Task>;
+    type Spawn: LocalSpawn;
 
     /// Called when the runner is started.
     ///
@@ -36,7 +33,11 @@ pub trait Runner {
     /// It's possible that a task can't be finished in a single execution, in
     /// which case feel free to spawn the task again and return false to
     /// indicate the task has not been finished yet.
-    fn handle(&mut self, spawn: &mut Self::Spawn, task: Self::Task) -> bool;
+    fn handle(
+        &mut self,
+        spawn: &mut Self::Spawn,
+        task_cell: <Self::Spawn as LocalSpawn>::TaskCell,
+    ) -> bool;
 
     /// Called when the runner is put to sleep.
     fn pause(&mut self, _spawn: &mut Self::Spawn) -> bool {
@@ -52,8 +53,8 @@ pub trait Runner {
     fn end(&mut self, _spawn: &mut Self::Spawn) {}
 }
 
-/// A task which can be spawned by [`RemoteSpawn`]. It must contain necessary spawn options.
-pub trait RemoteTask<SpawnOptions> {
+/// A task which can be spawned. It also contains necessary spawn options.
+pub trait TaskCell<SpawnOptions> {
     /// Gets the spawn options.
     fn spawn_options(&self) -> &SpawnOptions;
 }
@@ -61,23 +62,25 @@ pub trait RemoteTask<SpawnOptions> {
 /// Allows spawning a task to the thread pool from a different thread.
 pub trait RemoteSpawn: Sync + Send {
     /// The task it can spawn.
-    type Task: RemoteTask<Self::SpawnOptions>;
+    type TaskCell: TaskCell<Self::SpawnOptions>;
     /// The spawn options.
     type SpawnOptions;
 
-    /// Spawns a task cell into the thread pool.
-    fn spawn(&self, task: impl Into<Self::Task>);
+    /// Spawns a task into the thread pool.
+    fn spawn(&self, task_cell: Self::TaskCell);
 }
 
 /// Allows spawning a task inside the thread pool.
 pub trait LocalSpawn {
     /// The task it can spawn.
-    type Task;
+    type TaskCell: TaskCell<Self::SpawnOptions>;
+    /// The spawn options.
+    type SpawnOptions;
     /// The remote handle that can be used in other threads.
-    type Remote: RemoteSpawn;
+    type Remote: RemoteSpawn<TaskCell = Self::TaskCell, SpawnOptions = Self::SpawnOptions>;
 
     /// Spawns a task into the thread pool.
-    fn spawn(&mut self, task: impl Into<Self::Task>);
+    fn spawn(&mut self, task: Self::TaskCell);
 
     /// Gets a remote instance to allow spawn task back to the pool.
     fn remote(&self) -> Self::Remote;

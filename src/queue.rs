@@ -8,7 +8,7 @@
 /// data struct.
 pub trait TaskQueue: Clone {
     type Consumer;
-    type Task;
+    type TaskCell;
 
     /// Creates a queue with a promise to only use at most `con` consumers
     /// at the same time.
@@ -17,7 +17,7 @@ pub trait TaskQueue: Clone {
     /// Pushes a task to the queue.
     ///
     /// If the queue is closed, the method should behave like no-op.
-    fn push(&self, task: Self::Task);
+    fn push(&self, task: Self::TaskCell);
 
     /// Closes the queue so that no more tasks can be scheduled.
     fn close(&self);
