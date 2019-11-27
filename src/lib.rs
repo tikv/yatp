@@ -11,4 +11,4 @@ mod runner;
 pub mod task;
 
 pub use self::pool::{Builder, Remote, ThreadPool};
-pub use self::runner::{LocalSpawn, RemoteSpawn, Runner, TaskCell};
+pub use self::runner::{LocalSpawn, RemoteSpawn, Runner};

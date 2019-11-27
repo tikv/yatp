@@ -53,18 +53,10 @@ pub trait Runner {
     fn end(&mut self, _spawn: &mut Self::Spawn) {}
 }
 
-/// A task which can be spawned. It also contains necessary spawn options.
-pub trait TaskCell<SpawnOptions> {
-    /// Gets the spawn options.
-    fn spawn_options(&self) -> &SpawnOptions;
-}
-
 /// Allows spawning a task to the thread pool from a different thread.
 pub trait RemoteSpawn: Sync + Send {
     /// The task it can spawn.
-    type TaskCell: TaskCell<Self::SpawnOptions>;
-    /// The spawn options.
-    type SpawnOptions;
+    type TaskCell;
 
     /// Spawns a task into the thread pool.
     fn spawn(&self, task_cell: Self::TaskCell);
@@ -73,11 +65,9 @@ pub trait RemoteSpawn: Sync + Send {
 /// Allows spawning a task inside the thread pool.
 pub trait LocalSpawn {
     /// The task it can spawn.
-    type TaskCell: TaskCell<Self::SpawnOptions>;
-    /// The spawn options.
-    type SpawnOptions;
+    type TaskCell;
     /// The remote handle that can be used in other threads.
-    type Remote: RemoteSpawn<TaskCell = Self::TaskCell, SpawnOptions = Self::SpawnOptions>;
+    type Remote: RemoteSpawn<TaskCell = Self::TaskCell>;
 
     /// Spawns a task into the thread pool.
     fn spawn(&mut self, task: Self::TaskCell);

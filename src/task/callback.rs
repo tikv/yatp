@@ -2,59 +2,36 @@
 
 //! A [`FnOnce`] or [`FnMut`] closure.
 
-use crate::{LocalSpawn, TaskCell};
+use crate::LocalSpawn;
 
 use std::marker::PhantomData;
 
 /// A callback task, which is either a [`FnOnce`] or a [`FnMut`].
-pub enum Task<Spawn, SpawnOptions> {
+pub enum Task<Spawn> {
     /// A [`FnOnce`] task.
-    Once {
-        /// The task closure.
-        func: Box<dyn FnOnce(&mut Handle<'_, Spawn>) + Send>,
-        /// The spawn options.
-        options: SpawnOptions,
-    },
+    Once(Box<dyn FnOnce(&mut Handle<'_, Spawn>) + Send>),
     /// A [`FnMut`] task.
-    Mut {
-        /// The task closure.
-        func: Box<dyn FnMut(&mut Handle<'_, Spawn>) + Send>,
-        /// The spawn options.
-        options: SpawnOptions,
-    },
+    Mut(Box<dyn FnMut(&mut Handle<'_, Spawn>) + Send>),
 }
 
-impl<Spawn, SpawnOptions> Task<Spawn, SpawnOptions> {
+impl<Spawn> Task<Spawn> {
     /// Creates a [`FnOnce`] task.
-    pub fn new_once(
-        t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static,
-        options: SpawnOptions,
-    ) -> Self {
-        Task::Once {
-            func: Box::new(t),
-            options,
-        }
+    pub fn new_once(t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static) -> Self {
+        Task::Once(Box::new(t))
     }
 
     /// Creates a [`FnMut`] task.
-    pub fn new_mut(
-        t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static,
-        options: SpawnOptions,
-    ) -> Self {
-        Task::Mut {
-            func: Box::new(t),
-            options,
-        }
+    pub fn new_mut(t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static) -> Self {
+        Task::Mut(Box::new(t))
     }
 }
 
-impl<Spawn, SpawnOptions> TaskCell<SpawnOptions> for Task<Spawn, SpawnOptions> {
-    fn spawn_options(&self) -> &SpawnOptions {
-        match self {
-            Task::Once { options, .. } => options,
-            Task::Mut { options, .. } => options,
-        }
-    }
+/// The task cell for callback tasks.
+pub struct TaskCell<Spawn, Options> {
+    /// The callback task.
+    pub task: Task<Spawn>,
+    /// Extra information about the task.
+    pub options: Options,
 }
 
 /// Handle passed to the task closure.
@@ -66,26 +43,32 @@ pub struct Handle<'a, Spawn> {
     rerun: bool,
 }
 
-impl<'a, Spawn, SpawnOptions> Handle<'a, Spawn>
+impl<'a, Spawn, Options> Handle<'a, Spawn>
 where
-    Spawn: LocalSpawn<TaskCell = Task<Spawn, SpawnOptions>, SpawnOptions = SpawnOptions>,
+    Spawn: LocalSpawn<TaskCell = TaskCell<Spawn, Options>>,
 {
     /// Spawns a [`FnOnce`] to the thread pool.
     pub fn spawn_once(
         &mut self,
         t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static,
-        options: SpawnOptions,
+        options: Options,
     ) {
-        self.spawn.spawn(Task::new_once(t, options));
+        self.spawn.spawn(TaskCell {
+            task: Task::new_once(t),
+            options,
+        });
     }
 
     /// Spawns a [`FnMut`] to the thread pool.
     pub fn spawn_mut(
         &mut self,
         t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static,
-        options: SpawnOptions,
+        options: Options,
     ) {
-        self.spawn.spawn(Task::new_mut(t, options));
+        self.spawn.spawn(TaskCell {
+            task: Task::new_mut(t),
+            options,
+        });
     }
 
     /// Sets whether this task should be rerun later.
@@ -128,22 +111,22 @@ impl<Spawn> Default for Runner<Spawn> {
     }
 }
 
-impl<Spawn, SpawnOptions> crate::Runner for Runner<Spawn>
+impl<Spawn, Options> crate::Runner for Runner<Spawn>
 where
-    Spawn: LocalSpawn<TaskCell = Task<Spawn, SpawnOptions>, SpawnOptions = SpawnOptions>,
+    Spawn: LocalSpawn<TaskCell = TaskCell<Spawn, Options>>,
 {
     type Spawn = Spawn;
 
-    fn handle(&mut self, spawn: &mut Spawn, mut task: Task<Spawn, SpawnOptions>) -> bool {
+    fn handle(&mut self, spawn: &mut Spawn, mut task_cell: TaskCell<Spawn, Options>) -> bool {
         let mut handle = Handle {
             spawn,
             rerun: false,
         };
-        match task {
-            Task::Mut { ref mut func, .. } => {
+        match task_cell.task {
+            Task::Mut(ref mut r) => {
                 let mut rerun_times = 0;
                 loop {
-                    func(&mut handle);
+                    r(&mut handle);
                     if !handle.rerun {
                         return true;
                     }
@@ -154,12 +137,12 @@ where
                     handle.rerun = false;
                 }
             }
-            Task::Once { func, .. } => {
-                func(&mut handle);
+            Task::Once(r) => {
+                r(&mut handle);
                 return true;
             }
         }
-        spawn.spawn(task);
+        spawn.spawn(task_cell);
         false
     }
 }
@@ -177,11 +160,10 @@ mod tests {
     }
 
     impl LocalSpawn for MockSpawn {
-        type TaskCell = Task<MockSpawn, ()>;
-        type SpawnOptions = ();
+        type TaskCell = TaskCell<MockSpawn, ()>;
         type Remote = MockSpawn;
 
-        fn spawn(&mut self, _t: Task<MockSpawn, ()>) {
+        fn spawn(&mut self, _t: TaskCell<MockSpawn, ()>) {
             self.spawn_times += 1;
         }
 
@@ -191,10 +173,9 @@ mod tests {
     }
 
     impl RemoteSpawn for MockSpawn {
-        type TaskCell = Task<MockSpawn, ()>;
-        type SpawnOptions = ();
+        type TaskCell = TaskCell<MockSpawn, ()>;
 
-        fn spawn(&self, _task: Task<MockSpawn, ()>) {
+        fn spawn(&self, _task: TaskCell<MockSpawn, ()>) {
             unimplemented!()
         }
     }
@@ -206,12 +187,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         runner.handle(
             &mut spawn,
-            Task::new_once(
-                move |_| {
+            TaskCell {
+                task: Task::new_once(move |_| {
                     tx.send(42).unwrap();
-                },
-                (),
-            ),
+                }),
+                options: (),
+            },
         );
         assert_eq!(rx.recv().unwrap(), 42);
     }
@@ -225,16 +206,16 @@ mod tests {
         let mut times = 0;
         runner.handle(
             &mut spawn,
-            Task::new_mut(
-                move |handle| {
+            TaskCell {
+                task: Task::new_mut(move |handle| {
                     tx.send(42).unwrap();
                     times += 1;
                     if times < 2 {
                         handle.set_rerun(true);
                     }
-                },
-                (),
-            ),
+                }),
+                options: (),
+            },
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
@@ -251,16 +232,16 @@ mod tests {
         let mut times = 0;
         runner.handle(
             &mut spawn,
-            Task::new_mut(
-                move |handle| {
+            TaskCell {
+                task: Task::new_mut(move |handle| {
                     tx.send(42).unwrap();
                     times += 1;
                     if times < 3 {
                         handle.set_rerun(true);
                     }
-                },
-                (),
-            ),
+                }),
+                options: (),
+            },
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
