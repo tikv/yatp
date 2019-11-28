@@ -53,7 +53,7 @@ impl<Q: TaskQueue> LazyBuilder<Q> {
     pub fn build<F>(self, mut factory: F) -> ThreadPool<Q>
     where
         F: RunnerBuilder,
-        F::Runner: Runner<Task = Q::Task> + Send + 'static,
+        F::Runner: Runner + Send + 'static,
     {
         let mut threads = Vec::with_capacity(self.builder.sched_config.max_thread_count);
         for i in 0..self.builder.sched_config.max_thread_count {
@@ -181,8 +181,7 @@ impl Builder {
     where
         Q: TaskQueue,
         B: RunnerBuilder,
-        B::Runner: Runner<Task = Q::Task> + Send + 'static,
-        <<B as RunnerBuilder>::Runner as Runner>::Task: Send,
+        B::Runner: Runner + Send + 'static,
     {
         self.freeze().1.build(builder)
     }
@@ -198,7 +197,7 @@ impl<Q: TaskQueue> ThreadPool<Q> {
     /// Spawns the task into the thread pool.
     ///
     /// If the pool is shutdown, it becomes no-op.
-    pub fn spawn(&self, t: impl Into<Q::Task>) {
+    pub fn spawn(&self, t: impl Into<Q::TaskCell>) {
         self.queue.push(t.into());
     }
 
@@ -239,7 +238,7 @@ impl<Q: TaskQueue> Remote<Q> {
     /// Spawns the tasks into thread pool.
     ///
     /// If the thread pool is shutdown, it becomes no-op.
-    pub fn spawn(&self, t: impl Into<Q::Task>) {
+    pub fn spawn(&self, t: impl Into<Q::TaskCell>) {
         self.queue.push(t.into());
     }
 }
