@@ -1,5 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod simple;
+
 /// A cell containing a task and needed extra information.
 pub trait TaskCell {
     /// Extra information in the cell.
@@ -16,18 +18,22 @@ pub trait TaskCell {
 /// which make it possible to do extreme optimizations and define complicated
 /// data struct.
 pub trait TaskQueue: Clone {
-    type Consumer;
+    type Consumer: Consumer;
     type TaskCell: TaskCell;
 
     /// Creates a queue with a promise to only use at most `con` consumers
     /// at the same time.
-    fn with_consumers(con: usize) -> Self;
+    fn new(con: usize) -> (Self, Vec<Self::Consumer>);
 
     /// Pushes a task to the queue.
     ///
     /// If the queue is closed, the method should behave like no-op.
     fn push(&self, task: Self::TaskCell);
+}
 
-    /// Closes the queue so that no more tasks can be scheduled.
-    fn close(&self);
+/// The consumer of a task queue.
+pub trait Consumer {
+    type TaskCell: TaskCell;
+
+    fn pop(&mut self) -> Option<Self::TaskCell>;
 }

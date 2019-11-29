@@ -30,12 +30,13 @@ pub(crate) struct SchedConfig {
 }
 
 /// A builder for lazy spawning.
-pub struct LazyBuilder<Q> {
+pub struct LazyBuilder<Q: TaskQueue> {
     builder: Builder,
     queue: Q,
+    consumers: Vec<Q::Consumer>,
 }
 
-impl<Q> LazyBuilder<Q> {
+impl<Q: TaskQueue> LazyBuilder<Q> {
     /// Sets the name prefix of threads. The thread name will follow the
     /// format "prefix-index".
     pub fn name(mut self, name_prefix: impl Into<String>) -> LazyBuilder<Q> {
@@ -54,16 +55,24 @@ impl<Q: TaskQueue> LazyBuilder<Q> {
     where
         F: RunnerBuilder,
         F::Runner: Runner + Send + 'static,
+        Q::Consumer: Send + 'static,
     {
         let mut threads = Vec::with_capacity(self.builder.sched_config.max_thread_count);
-        for i in 0..self.builder.sched_config.max_thread_count {
+        for (i, consumer) in self.consumers.into_iter().enumerate() {
             let _r = factory.build();
             let name = format!("{}-{}", self.builder.name_prefix, i);
             let mut builder = thread::Builder::new().name(name);
             if let Some(size) = self.builder.stack_size {
                 builder = builder.stack_size(size)
             }
-            threads.push(builder.spawn(move || unimplemented!()).unwrap());
+            threads.push(
+                builder
+                    .spawn(move || {
+                        drop(consumer);
+                        unimplemented!()
+                    })
+                    .unwrap(),
+            );
         }
         ThreadPool {
             queue: self.queue,
@@ -163,7 +172,7 @@ impl Builder {
     /// to separate the construction and starting.
     pub fn freeze<Q: TaskQueue>(&self) -> (Remote<Q>, LazyBuilder<Q>) {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
-        let queue = Q::with_consumers(self.sched_config.max_thread_count);
+        let (queue, consumers) = Q::new(self.sched_config.max_thread_count);
 
         (
             Remote {
@@ -172,6 +181,7 @@ impl Builder {
             LazyBuilder {
                 builder: self.clone(),
                 queue,
+                consumers,
             },
         )
     }
@@ -180,6 +190,7 @@ impl Builder {
     pub fn build<Q, B>(&self, builder: B) -> ThreadPool<Q>
     where
         Q: TaskQueue,
+        Q::Consumer: Send + 'static,
         B: RunnerBuilder,
         B::Runner: Runner + Send + 'static,
     {
@@ -205,7 +216,7 @@ impl<Q: TaskQueue> ThreadPool<Q> {
     ///
     /// Closes the queue and wait for all threads to exit.
     pub fn shutdown(&self) {
-        self.queue.close();
+        // self.queue.close();
         let mut threads = mem::replace(&mut *self.threads.lock().unwrap(), Vec::new());
         for j in threads.drain(..) {
             j.join().unwrap();
