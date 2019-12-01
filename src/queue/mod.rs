@@ -1,7 +1,5 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-mod simple;
-
 /// A cell containing a task and needed extra information.
 pub trait TaskCell {
     /// Extra information in the cell.
@@ -35,5 +33,6 @@ pub trait TaskQueue: Clone {
 pub trait Consumer {
     type TaskCell: TaskCell;
 
+    /// Gets a task cell. Returns `None` if there is no task cell available.
     fn pop(&mut self) -> Option<Self::TaskCell>;
 }
