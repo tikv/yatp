@@ -18,7 +18,9 @@ pub trait TaskCell {
 /// which make it possible to do extreme optimizations and define complicated
 /// data struct.
 pub trait TaskQueue: Clone {
+    /// The consumer of the task queue.
     type Consumer: Consumer;
+    /// The task cell in the queue.
     type TaskCell: TaskCell;
 
     /// Creates a queue with a promise to only use at most `con` consumers
@@ -26,13 +28,12 @@ pub trait TaskQueue: Clone {
     fn new(con: usize) -> (Self, Vec<Self::Consumer>);
 
     /// Pushes a task to the queue.
-    ///
-    /// If the queue is closed, the method should behave like no-op.
     fn push(&self, task: Self::TaskCell);
 }
 
 /// The consumer of a task queue.
 pub trait Consumer {
+    /// The task cell in the queue.
     type TaskCell: TaskCell;
 
     /// Gets a task cell. Returns `None` if there is no task cell available.
