@@ -1,5 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+//! The task queues available for the thread pool.
+
 /// A cell containing a task and needed extra information.
 pub trait TaskCell {
     /// Extra information in the cell.
