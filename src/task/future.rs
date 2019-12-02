@@ -25,8 +25,9 @@ pub struct Task<Remote, Extras> {
 /// A [`Future`] task cell.
 pub struct TaskCell<Remote, Extras>(Arc<Task<Remote, Extras>>);
 
-unsafe impl<Remote: Send + Sync, Extras> Send for TaskCell<Remote, Extras> {}
-unsafe impl<Remote: Send + Sync, Extras> Sync for TaskCell<Remote, Extras> {}
+// Safety: It is ensured that `future` and `extras` are always accessed by
+// only one thread at the same time.
+unsafe impl<Remote: Sync, Extras> Sync for Task<Remote, Extras> {}
 
 impl<Remote, Extras> fmt::Debug for TaskCell<Remote, Extras> {
     #[inline]
