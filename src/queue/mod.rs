@@ -1,6 +1,12 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 //! The task queues available for the thread pool.
+//!
+//! A task queue has two parts: a shared `[TaskInjector]` and several
+//! [`LocalQueue`]s. Unlike usual MPMC queues, [`LocalQueue`] is not required
+//! to be `Sync`. The thread pool will use one [`LocalQueue`] per thread,
+//! which make it possible to do extreme optimizations and define complicated
+//! data structs.
 
 use std::time::Instant;
 
@@ -13,32 +19,43 @@ pub trait TaskCell {
     fn mut_extras(&mut self) -> &mut Self::Extras;
 }
 
-/// A Task queue for thread pool.
-///
-/// Unlike a general MPMC queues, it's not required to be `Sync` on the
-/// consumer side. Thread pool will use one consumer local queue per thread,
-/// which make it possible to do extreme optimizations and define complicated
-/// data struct.
-pub trait TaskQueue: Clone {
-    /// The consumer of the task queue.
-    type Consumer: Consumer;
+/// The injector of a task queue.
+pub trait TaskInjector: Clone {
+    /// The local queue of the task queue.
+    type LocalQueue: LocalQueue;
     /// The task cell in the queue.
     type TaskCell: TaskCell;
 
-    /// Creates a queue with a promise to only use at most `con` consumers
+    /// Creates a queue with a promise to only have at most `num` local queues
     /// at the same time.
-    fn new(con: usize) -> (Self, Vec<Self::Consumer>);
+    fn new(num: usize) -> (Self, Vec<Self::LocalQueue>);
 
     /// Pushes a task to the queue.
-    fn push(&self, task: Self::TaskCell);
+    fn push(&self, task_cell: Self::TaskCell);
 }
 
-/// The consumer of a task queue.
-pub trait Consumer {
+/// Popped task cell from a task queue.
+pub struct Pop<T> {
+    /// The task cell
+    pub task_cell: T,
+
+    /// When the task was pushed to the queue.
+    pub schedule_time: Instant,
+
+    /// Whether the task comes from the current [`LocalQueue`] instead of being
+    /// just stolen from the injector or other [`LocalQueue`]s.
+    pub from_local: bool,
+}
+
+/// The local queue of a task queue.
+pub trait LocalQueue {
     /// The task cell in the queue.
     type TaskCell: TaskCell;
 
-    /// Gets a task cell and the time when it was pushed to the queue.
-    /// Returns `None` if there is no task cell available.
-    fn pop(&mut self) -> Option<(Self::TaskCell, Instant)>;
+    /// Pushes a task to the local queue.
+    fn push(&mut self, task_cell: Self::TaskCell);
+
+    /// Gets a task cell from the queue. Rturns `None` if there is no task cell
+    /// available.
+    fn pop(&mut self) -> Option<Pop<Self::TaskCell>>;
 }
