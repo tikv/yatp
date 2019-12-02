@@ -2,6 +2,8 @@
 
 //! The task queues available for the thread pool.
 
+use std::time::Instant;
+
 /// A cell containing a task and needed extra information.
 pub trait TaskCell {
     /// Extra information in the cell.
@@ -36,6 +38,7 @@ pub trait Consumer {
     /// The task cell in the queue.
     type TaskCell: TaskCell;
 
-    /// Gets a task cell. Returns `None` if there is no task cell available.
-    fn pop(&mut self) -> Option<Self::TaskCell>;
+    /// Gets a task cell and the time when it was pushed to the queue.
+    /// Returns `None` if there is no task cell available.
+    fn pop(&mut self) -> Option<(Self::TaskCell, Instant)>;
 }
