@@ -216,7 +216,6 @@ impl<Q: TaskQueue> ThreadPool<Q> {
     ///
     /// Closes the queue and wait for all threads to exit.
     pub fn shutdown(&self) {
-        // self.queue.close();
         let mut threads = mem::replace(&mut *self.threads.lock().unwrap(), Vec::new());
         for j in threads.drain(..) {
             j.join().unwrap();
