@@ -47,7 +47,7 @@ impl<I, L> LazyBuilder<I, L> {
 
 impl<I, L> LazyBuilder<I, L>
 where
-    I: TaskInjector<LocalQueue = L>,
+    I: TaskInjector,
     L: LocalQueue + Send + 'static,
 {
     /// Spawns all the required threads.
@@ -170,12 +170,22 @@ impl Builder {
     /// Freezes the configurations and returns the task scheduler and
     /// a builder to for lazy spawning threads.
     ///
+    /// `queue_builder` is a closure that creates a task queue. It accepts the
+    /// number of local queues and returns the task injector and local queues.
+    ///
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
     /// to separate the construction and starting.
-    pub fn freeze<I: TaskInjector>(&self) -> (Remote<I>, LazyBuilder<I, I::LocalQueue>) {
+    pub fn freeze<I, L>(
+        &self,
+        queue_builder: impl FnOnce(usize) -> (I, Vec<L>),
+    ) -> (Remote<I>, LazyBuilder<I, L>)
+    where
+        I: TaskInjector,
+        L: LocalQueue<TaskCell = I::TaskCell> + Send + 'static,
+    {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
-        let (injector, local_queues) = I::new(self.sched_config.max_thread_count);
+        let (injector, local_queues) = queue_builder(self.sched_config.max_thread_count);
 
         (
             Remote {
@@ -190,14 +200,21 @@ impl Builder {
     }
 
     /// Spawns the thread pool immediately.
-    pub fn build<I, B>(&self, builder: B) -> ThreadPool<I>
+    ///
+    /// `queue_builder` is a closure that creates a task queue. It accepts the
+    /// number of local queues and returns the task injector and local queues.
+    pub fn build<I, L, B>(
+        &self,
+        queue_builder: impl FnOnce(usize) -> (I, Vec<L>),
+        runner_builder: B,
+    ) -> ThreadPool<I>
     where
         I: TaskInjector,
-        I::LocalQueue: Send + 'static,
+        L: LocalQueue<TaskCell = I::TaskCell> + Send + 'static,
         B: RunnerBuilder,
         B::Runner: Runner + Send + 'static,
     {
-        self.freeze().1.build(builder)
+        self.freeze(queue_builder).1.build(runner_builder)
     }
 }
 

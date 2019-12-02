@@ -21,14 +21,8 @@ pub trait TaskCell {
 
 /// The injector of a task queue.
 pub trait TaskInjector: Clone {
-    /// The local queue of the task queue.
-    type LocalQueue: LocalQueue;
     /// The task cell in the queue.
     type TaskCell: TaskCell;
-
-    /// Creates a queue with a promise to only have at most `num` local queues
-    /// at the same time.
-    fn new(num: usize) -> (Self, Vec<Self::LocalQueue>);
 
     /// Pushes a task to the queue.
     fn push(&self, task_cell: Self::TaskCell);
