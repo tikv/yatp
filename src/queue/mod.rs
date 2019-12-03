@@ -49,7 +49,7 @@ pub trait LocalQueue {
     /// Pushes a task to the local queue.
     fn push(&mut self, task_cell: Self::TaskCell);
 
-    /// Gets a task cell from the queue. Rturns `None` if there is no task cell
+    /// Gets a task cell from the queue. Returns `None` if there is no task cell
     /// available.
     fn pop(&mut self) -> Option<Pop<Self::TaskCell>>;
 }
