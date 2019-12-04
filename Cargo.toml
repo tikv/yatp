@@ -10,3 +10,4 @@ repository = "https://github.com/tikv/yatp/"
 
 [dependencies]
 num_cpus = "1.0"
+crossbeam-deque = "0.7"
