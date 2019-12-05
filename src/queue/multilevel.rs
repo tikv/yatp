@@ -3,13 +3,18 @@
 //! A multilevel feedback task queue.
 
 use super::{LocalQueue, Pop, TaskCell, TaskInjector};
+use crate::runner::{LocalSpawn, Runner, RunnerBuilder};
 
-use crossbeam_deque::{Injector, Steal};
+use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use crossbeam_epoch::{self, Atomic};
 use dashmap::DashMap;
 use init_with::InitWith;
+use rand::prelude::*;
+use std::cell::UnsafeCell;
 use std::future::Future;
+use std::iter;
 use std::marker::PhantomData;
+use std::ptr;
 use std::sync::atomic::{
     AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize,
     Ordering::{Relaxed, SeqCst},
@@ -18,21 +23,20 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const LEVEL_NUM: usize = 3;
-const ADJUST_RATIO_INTERVAL: Duration = Duration::from_secs(1);
+const CHANCE_RATIO: u32 = 4;
 const CLEANUP_OLD_MAP_THRESHOLD: u64 = 100_000;
+const ADJUST_POSSIBILITY_THRESHOLD: u64 = 2_000_000;
 
 pub struct MultilevelQueueInjector<T> {
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
-    level_time_threshold: [Duration; LEVEL_NUM - 1],
-    task_elapsed_map: TaskElapsedMap,
+    manager: Arc<LevelManager>,
 }
 
 impl<T> Clone for MultilevelQueueInjector<T> {
     fn clone(&self) -> Self {
         Self {
             level_injectors: self.level_injectors.clone(),
-            level_time_threshold: self.level_time_threshold,
-            task_elapsed_map: self.task_elapsed_map.clone(),
+            manager: self.manager.clone(),
         }
     }
 }
@@ -43,18 +47,24 @@ impl<T> Clone for MultilevelQueueInjector<T> {
 /// a task cell.
 #[derive(Debug, Default, Clone)]
 pub struct MultilevelQueueExtras {
+    task_id: u64,
     /// The instant when the task cell is pushed to the queue.
     schedule_time: Option<Instant>,
-    running_time: TaskElapsed,
+    running_time: Option<Arc<ElapsedTime>>,
     current_level: u8,
     fixed_level: Option<u8>,
 }
 
-fn set_schedule_time<T>(task_cell: &mut T)
-where
-    T: TaskCell<Extras = MultilevelQueueExtras>,
-{
-    task_cell.mut_extras().schedule_time = Some(Instant::now());
+impl MultilevelQueueExtras {
+    pub fn new(task_id: u64, fixed_level: Option<u8>) -> Self {
+        Self {
+            task_id,
+            schedule_time: None,
+            running_time: None,
+            current_level: 0,
+            fixed_level,
+        }
+    }
 }
 
 impl<T> TaskInjector for MultilevelQueueInjector<T>
@@ -64,282 +74,294 @@ where
     type TaskCell = T;
 
     fn push(&self, mut task_cell: Self::TaskCell) {
-        let extras = task_cell.mut_extras();
-        let push_level = match extras.fixed_level {
-            Some(level) => level as usize,
-            None => {
-                let mut push_level = LEVEL_NUM - 1;
-                let running_time = extras.running_time.get();
-                for (level, &threshold) in self.level_time_threshold.iter().enumerate() {
-                    if running_time < threshold {
-                        push_level = level;
-                        break;
-                    }
+        self.manager.prepare_before_push(&mut task_cell);
+        let level = task_cell.mut_extras().current_level as usize;
+        self.level_injectors[level].push(task_cell);
+    }
+}
+
+pub struct MultilevelQueueLocal<T> {
+    local_queue: Worker<T>,
+    level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
+    stealers: Vec<Stealer<T>>,
+    self_index: usize,
+    manager: Arc<LevelManager>,
+    rng: SmallRng,
+}
+
+impl<T> LocalQueue for MultilevelQueueLocal<T>
+where
+    T: TaskCell<Extras = MultilevelQueueExtras>,
+{
+    type TaskCell = T;
+
+    fn push(&mut self, mut task_cell: Self::TaskCell) {
+        self.manager.prepare_before_push(&mut task_cell);
+        self.local_queue.push(task_cell);
+    }
+
+    fn pop(&mut self) -> Option<Pop<Self::TaskCell>> {
+        fn into_pop<T>(mut t: T, from_local: bool) -> Pop<T>
+        where
+            T: TaskCell<Extras = MultilevelQueueExtras>,
+        {
+            let schedule_time = t.mut_extras().schedule_time.unwrap();
+            Pop {
+                task_cell: t,
+                schedule_time,
+                from_local,
+            }
+        }
+
+        if let Some(t) = self.local_queue.pop() {
+            return Some(into_pop(t, true));
+        }
+        let mut need_retry;
+        loop {
+            need_retry = false;
+            let expected_level = if self
+                .rng
+                .gen_ratio(self.manager.get_level0_possibility(), u32::max_value())
+            {
+                0
+            } else {
+                (1..LEVEL_NUM - 1)
+                    .find(|_| self.rng.gen_ratio(CHANCE_RATIO, CHANCE_RATIO + 1))
+                    .unwrap_or(LEVEL_NUM - 1)
+            };
+            match self.level_injectors[expected_level].steal_batch_and_pop(&self.local_queue) {
+                Steal::Success(t) => return Some(into_pop(t, false)),
+                Steal::Retry => need_retry = true,
+                _ => {}
+            }
+            for (i, stealer) in self.stealers.iter().enumerate() {
+                if i == self.self_index {
+                    continue;
                 }
-                push_level
+                match stealer.steal_batch_and_pop(&self.local_queue) {
+                    Steal::Success(t) => return Some(into_pop(t, false)),
+                    Steal::Retry => need_retry = true,
+                    _ => {}
+                }
+            }
+            for injector in self
+                .level_injectors
+                .iter()
+                .chain(&*self.level_injectors)
+                .skip(expected_level + 1)
+                .take(LEVEL_NUM - 1)
+            {
+                match injector.steal_batch_and_pop(&self.local_queue) {
+                    Steal::Success(t) => return Some(into_pop(t, false)),
+                    Steal::Retry => need_retry = true,
+                    _ => {}
+                }
+            }
+            if !need_retry {
+                break None;
+            }
+        }
+    }
+}
+
+pub struct MultilevelRunner<R> {
+    inner: R,
+    manager: Arc<LevelManager>,
+}
+
+impl<R, S, T> Runner for MultilevelRunner<R>
+where
+    R: Runner<Spawn = S>,
+    S: LocalSpawn<TaskCell = T>,
+    T: TaskCell<Extras = MultilevelQueueExtras>,
+{
+    type Spawn = R::Spawn;
+
+    fn start(&mut self, spawn: &mut Self::Spawn) {
+        self.inner.start(spawn)
+    }
+
+    fn handle(
+        &mut self,
+        spawn: &mut Self::Spawn,
+        mut task_cell: <Self::Spawn as LocalSpawn>::TaskCell,
+    ) -> bool {
+        let extras = task_cell.mut_extras();
+        let running_time = extras.running_time.clone();
+        let level = extras.current_level;
+        let begin = Instant::now();
+        let res = self.inner.handle(spawn, task_cell);
+        let elapsed = begin.elapsed();
+        if let Some(running_time) = running_time {
+            running_time.inc_by(elapsed);
+        }
+        if level == 0 {
+            self.manager.level0_elapsed.inc_by(elapsed);
+        }
+        let current_total = self.manager.total_elapsed.inc_by(elapsed) + elapsed.as_micros() as u64;
+        if current_total > ADJUST_POSSIBILITY_THRESHOLD {
+            self.manager.maybe_adjust_possibility(current_total);
+        }
+        res
+    }
+
+    fn pause(&mut self, spawn: &mut Self::Spawn) -> bool {
+        self.inner.pause(spawn)
+    }
+
+    fn resume(&mut self, spawn: &mut Self::Spawn) {
+        self.inner.resume(spawn)
+    }
+
+    fn end(&mut self, spawn: &mut Self::Spawn) {
+        self.inner.end(spawn)
+    }
+}
+
+struct LevelManager {
+    level0_elapsed: ElapsedTime,
+    total_elapsed: ElapsedTime,
+    task_elapsed_map: TaskElapsedMap,
+    level_time_threshold: [Duration; LEVEL_NUM - 1],
+    level0_possibility: UnsafeCell<u32>,
+    level0_proportion_target: f64,
+}
+
+impl LevelManager {
+    fn prepare_before_push<T>(&self, task_cell: &mut T)
+    where
+        T: TaskCell<Extras = MultilevelQueueExtras>,
+    {
+        let extras = task_cell.mut_extras();
+        let task_id = extras.task_id;
+        let running_time = extras
+            .running_time
+            .get_or_insert_with(|| self.task_elapsed_map.get_elapsed(task_id));
+        let current_level = match extras.fixed_level {
+            Some(level) => level,
+            None => {
+                let running_time = running_time.get();
+                self.level_time_threshold
+                    .iter()
+                    .enumerate()
+                    .find(|(_, &threshold)| running_time < threshold)
+                    .map(|(level, _)| level)
+                    .unwrap_or(LEVEL_NUM - 1) as u8
             }
         };
-        task_cell.mut_extras().current_level = push_level as u8;
-        set_schedule_time(&mut task_cell);
-        self.level_injectors[push_level].push(task_cell);
+        extras.current_level = current_level;
+        extras.schedule_time = Some(Instant::now());
     }
+
+    fn get_level0_possibility(&self) -> u32 {
+        unsafe { *self.level0_possibility.get() }
+    }
+
+    fn maybe_adjust_possibility(&self, mut current_total: u64) {}
 }
 
-// pub struct MultilevelQueue<T> {
-//     injectors: [Injector<T>; LEVEL_NUM],
-//     level_elapsed: LevelElapsed,
-//     task_elapsed_map: TaskElapsedMap,
-//     level_chance_ratio: LevelChanceRatio,
-//     target_ratio: TargetRatio,
-// }
+#[derive(Default, Debug)]
+struct ElapsedTime(AtomicU64);
 
-// impl<Task, T: AsRef<MultiLevelTask<Task>>> MultiLevelQueue<Task, T> {
-//     pub fn new() -> Self {
-//         Self {
-//             injectors: <[Injector<SchedUnit<T>>; LEVEL_NUM]>::init_with(|| Injector::new()),
-//             level_elapsed: LevelElapsed::default(),
-//             task_elapsed_map: TaskElapsedMap::new(),
-//             level_chance_ratio: LevelChanceRatio::default(),
-//             target_ratio: TargetRatio::default(),
-//             _phantom: PhantomData,
-//         }
-//     }
-
-//     pub fn create_task(
-//         &self,
-//         task: Task,
-//         task_id: u64,
-//         fixed_level: Option<u8>,
-//     ) -> MultiLevelTask<Task> {
-//         let elapsed = self.task_elapsed_map.get_elapsed(task_id);
-//         let level = fixed_level.unwrap_or_else(|| self.expected_level(elapsed.get()));
-//         MultiLevelTask {
-//             task,
-//             elapsed,
-//             level: AtomicU8::new(level),
-//             fixed_level,
-//         }
-//     }
-
-//     fn expected_level(&self, elapsed: Duration) -> u8 {
-//         match elapsed.as_micros() {
-//             0..=999 => 0,
-//             1000..=29_999 => 1,
-//             _ => 2,
-//         }
-//     }
-
-//     pub fn target_ratio(&self) -> TargetRatio {
-//         self.target_ratio.clone()
-//     }
-
-//     pub fn async_adjust_level_ratio(&self) -> impl Future<Output = ()> {
-//         let level_elapsed = self.level_elapsed.clone();
-//         let level_chance_ratio = self.level_chance_ratio.clone();
-//         let target_ratio = self.target_ratio.clone();
-//         async move {
-//             let mut last_elapsed = level_elapsed.load_all();
-//             loop {
-//                 Delay::new(ADJUST_RATIO_INTERVAL).await;
-//                 let curr_elapsed = level_elapsed.load_all();
-//                 let diff_elapsed = <[f32; LEVEL_NUM]>::init_with_indices(|i| {
-//                     (curr_elapsed[i] - last_elapsed[i]) as f32
-//                 });
-//                 last_elapsed = curr_elapsed;
-
-//                 let sum: f32 = diff_elapsed.iter().sum();
-//                 if sum == 0.0 {
-//                     continue;
-//                 }
-//                 let curr_l0_ratio = diff_elapsed[0] / sum;
-//                 let target_l0_ratio = target_ratio.get_l0_target();
-//                 if curr_l0_ratio > target_l0_ratio + 0.05 {
-//                     let ratio01 = level_chance_ratio.0[0].load(SeqCst) as f32;
-//                     let new_ratio01 = u32::min((ratio01 * 1.6).round() as u32, MAX_L0_CHANCE_RATIO);
-//                     level_chance_ratio.0[0].store(new_ratio01, SeqCst);
-//                 } else if curr_l0_ratio < target_l0_ratio - 0.05 {
-//                     let ratio01 = level_chance_ratio.0[0].load(SeqCst) as f32;
-//                     let new_ratio01 = u32::max((ratio01 / 1.6).round() as u32, MIN_L0_CHANCE_RATIO);
-//                     level_chance_ratio.0[0].store(new_ratio01, SeqCst);
-//                 }
-//             }
-//         }
-//     }
-
-//     pub fn async_cleanup_stats(&self) -> impl Future<Output = ()> {
-//         self.task_elapsed_map.async_cleanup()
-//     }
-// }
-
-// impl<Task, T: AsRef<MultiLevelTask<Task>>> GlobalQueue for MultiLevelQueue<Task, T> {
-//     type Task = T;
-
-//     fn steal_batch_and_pop(
-//         &self,
-//         local_queue: &crossbeam_deque::Worker<SchedUnit<T>>,
-//     ) -> Steal<SchedUnit<T>> {
-//         let level = self.level_chance_ratio.rand_level();
-//         match self.injectors[level].steal_batch_and_pop(local_queue) {
-//             s @ Steal::Success(_) | s @ Steal::Retry => return s,
-//             _ => {}
-//         }
-//         for queue in self
-//             .injectors
-//             .iter()
-//             .skip(level + 1)
-//             .chain(&self.injectors)
-//             .take(LEVEL_NUM)
-//         {
-//             match queue.steal_batch_and_pop(local_queue) {
-//                 s @ Steal::Success(_) | s @ Steal::Retry => return s,
-//                 _ => {}
-//             }
-//         }
-//         Steal::Empty
-//     }
-
-//     fn push(&self, task: SchedUnit<T>) {
-//         let multi_level_task = task.task.as_ref();
-//         let elapsed = multi_level_task.elapsed.get();
-//         let level = multi_level_task
-//             .fixed_level
-//             .unwrap_or_else(|| self.expected_level(elapsed));
-//         multi_level_task.level.store(level, SeqCst);
-//         self.injectors[level as usize].push(task);
-//     }
-// }
-
-// const MAX_L0_CHANCE_RATIO: u32 = 256;
-// const MIN_L0_CHANCE_RATIO: u32 = 1;
-
-// /// The i-th value represents the chance ratio of L_i and Sum[L_k] (k > i).
-// #[derive(Clone)]
-// struct LevelChanceRatio(Arc<[AtomicU32; LEVEL_NUM - 1]>);
-
-// impl Default for LevelChanceRatio {
-//     fn default() -> Self {
-//         Self(Arc::new([AtomicU32::new(32), AtomicU32::new(4)]))
-//     }
-// }
-
-// impl LevelChanceRatio {
-//     fn rand_level(&self) -> usize {
-//         let mut rng = thread_rng();
-//         for (level, ratio) in self.0.iter().enumerate() {
-//             let ratio = ratio.load(Relaxed);
-//             if rng.gen_ratio(ratio, ratio.saturating_add(1)) {
-//                 return level;
-//             }
-//         }
-//         return LEVEL_NUM - 1;
-//     }
-// }
-
-/// The expected time percentage used by L0 tasks.
-#[derive(Clone)]
-pub struct TargetRatio(Arc<AtomicU8>);
-
-impl Default for TargetRatio {
-    fn default() -> Self {
-        Self(Arc::new(AtomicU8::new(80)))
-    }
-}
-
-impl TargetRatio {
-    pub fn set_l0_target(&self, ratio: f32) {
-        assert!(ratio >= 0.0 && ratio <= 1.0);
-        self.0.store((100.0 * ratio) as u8, Relaxed);
-    }
-
-    pub fn get_l0_target(&self) -> f32 {
-        self.0.load(Relaxed) as f32 / 100.0
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct LevelElapsed(Arc<[AtomicU64; LEVEL_NUM]>);
-
-impl LevelElapsed {
-    pub fn inc_level_by(&self, level: u8, t: Duration) {
-        self.0[level as usize].fetch_add(t.as_micros() as u64, Relaxed);
-    }
-
-    fn load_all(&self) -> [u64; LEVEL_NUM] {
-        <[u64; LEVEL_NUM]>::init_with_indices(|i| self.0[i].load(Relaxed))
-    }
-}
-
-#[derive(Clone, Default, Debug)]
-pub struct TaskElapsed(Arc<AtomicU64>);
-
-impl TaskElapsed {
-    pub fn get(&self) -> Duration {
+impl ElapsedTime {
+    fn get(&self) -> Duration {
         Duration::from_micros(self.0.load(Relaxed))
     }
 
-    pub fn inc_by(&self, t: Duration) {
-        self.0.fetch_add(t.as_micros() as u64, Relaxed);
+    fn inc_by(&self, t: Duration) -> u64 {
+        self.0.fetch_add(t.as_micros() as u64, Relaxed)
     }
-}
-
-#[derive(Clone)]
-struct TaskElapsedMap {
-    inner: Arc<TaskElapsedMapInner>,
 }
 
 #[derive(Default)]
-struct TaskElapsedMapInner {
+struct TaskElapsedMap {
     counter: AtomicU64,
     new_index: AtomicUsize,
-    maps: [DashMap<u64, TaskElapsed>; 2],
+    maps: [DashMap<u64, Arc<ElapsedTime>>; 2],
 }
 
 impl TaskElapsedMap {
-    pub fn new() -> Self {
-        TaskElapsedMap {
-            inner: Arc::new(Default::default()),
-        }
-    }
-
-    pub fn get_elapsed(&self, key: u64) -> TaskElapsed {
-        let inner = &self.inner;
-        let new_index = inner.new_index.load(SeqCst);
-        let new_map = &inner.maps[new_index];
-        let old_map = &inner.maps[new_index ^ 1];
+    pub fn get_elapsed(&self, key: u64) -> Arc<ElapsedTime> {
+        let new_index = self.new_index.load(SeqCst);
+        let new_map = &self.maps[new_index];
+        let old_map = &self.maps[new_index ^ 1];
         if let Some(v) = new_map.get(&key) {
             return v.clone();
         }
-        inner.counter.fetch_add(1, Relaxed);
+        let counter_value = self.counter.fetch_add(1, Relaxed);
         let elapsed = match old_map.remove(&key) {
             Some((_, v)) => {
                 new_map.insert(key, v.clone());
                 v
             }
             _ => {
-                let v = new_map.get_or_insert(&key, TaskElapsed::default());
+                let v = new_map.get_or_insert_with(&key, Default::default);
                 v.clone()
             }
         };
-        self.maybe_cleanup();
+        if counter_value > CLEANUP_OLD_MAP_THRESHOLD {
+            self.maybe_cleanup(counter_value + 1);
+        }
         elapsed
     }
 
-    fn maybe_cleanup(&self) {
-        let inner = &self.inner;
-        let mut old_counter = inner.counter.load(Relaxed);
-        while old_counter > CLEANUP_OLD_MAP_THRESHOLD {
-            match inner
+    fn maybe_cleanup(&self, mut counter_value: u64) {
+        while counter_value > CLEANUP_OLD_MAP_THRESHOLD {
+            match self
                 .counter
-                .compare_exchange_weak(old_counter, 0, SeqCst, Relaxed)
+                .compare_exchange_weak(counter_value, 0, SeqCst, Relaxed)
             {
                 Ok(_) => {
-                    let old_index = inner.new_index.fetch_xor(1, SeqCst);
-                    inner.maps[old_index].clear();
+                    let old_index = self.new_index.fetch_xor(1, SeqCst);
+                    self.maps[old_index].clear();
                 }
-                Err(v) => old_counter = v,
+                Err(v) => counter_value = v,
             }
         }
     }
+}
+
+/// Creates a multilevel task queue.
+pub fn create<T>(
+    local_num: usize,
+    level_time_threshold: [Duration; LEVEL_NUM - 1],
+    level0_possibility: u32,
+    level0_proportion_target: f64,
+) -> (MultilevelQueueInjector<T>, Vec<MultilevelQueueLocal<T>>) {
+    let level_injectors: Arc<[Injector<T>; LEVEL_NUM]> =
+        Arc::new(InitWith::init_with(|| Injector::new()));
+    let manager = Arc::new(LevelManager {
+        level0_elapsed: Default::default(),
+        total_elapsed: Default::default(),
+        task_elapsed_map: Default::default(),
+        level_time_threshold,
+        level0_possibility,
+        level0_proportion_target,
+    });
+    let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)
+        .take(local_num)
+        .collect();
+    let stealers: Vec<_> = workers.iter().map(Worker::stealer).collect();
+    let local_queues = workers
+        .into_iter()
+        .enumerate()
+        .map(|(self_index, local_queue)| MultilevelQueueLocal {
+            local_queue,
+            level_injectors: level_injectors.clone(),
+            stealers: stealers.clone(),
+            self_index,
+            manager: manager.clone(),
+            rng: SmallRng::from_rng(thread_rng()).unwrap(),
+        })
+        .collect();
+
+    (
+        MultilevelQueueInjector {
+            level_injectors,
+            manager,
+        },
+        local_queues,
+    )
 }
 
 #[cfg(test)]
@@ -349,7 +371,7 @@ mod tests {
     #[test]
     fn test_map_cleanup() {
         use std::thread;
-        let map = TaskElapsedMap::new();
+        let map = Arc::new(TaskElapsedMap::default());
         let mut handles = Vec::new();
         for _ in 0..6 {
             let map = map.clone();
