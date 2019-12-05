@@ -14,6 +14,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::{fmt, mem};
 
+/// The default repoll limit for a future runner. See `Runner::new` for
+/// details.
+const DEFAULT_REPOLL_LIMIT: usize = 5;
+
 /// A [`Future`] task.
 pub struct Task<Remote, Extras> {
     status: AtomicU8,
@@ -166,18 +170,14 @@ where
 }
 
 #[inline]
-unsafe fn task_cell<Remote, Extras>(task: *const Task<Remote, Extras>) -> TaskCell<Remote, Extras>
-where
-    Remote: RemoteSpawn<TaskCell = TaskCell<Remote, Extras>>,
-{
+unsafe fn task_cell<Remote, Extras>(task: *const Task<Remote, Extras>) -> TaskCell<Remote, Extras> {
     TaskCell(Arc::from_raw(task))
 }
 
 #[inline]
-unsafe fn clone_task<Remote, Extras>(task: *const Task<Remote, Extras>) -> TaskCell<Remote, Extras>
-where
-    Remote: RemoteSpawn<TaskCell = TaskCell<Remote, Extras>>,
-{
+unsafe fn clone_task<Remote, Extras>(
+    task: *const Task<Remote, Extras>,
+) -> TaskCell<Remote, Extras> {
     let task_cell = task_cell(task);
     mem::forget(task_cell.0.clone());
     task_cell
@@ -185,12 +185,27 @@ where
 
 /// [`Future`] task runner.
 pub struct Runner<Spawn> {
+    repoll_limit: usize,
     _phantom: PhantomData<Spawn>,
 }
 
 impl<Spawn> Default for Runner<Spawn> {
     fn default() -> Runner<Spawn> {
         Runner {
+            repoll_limit: DEFAULT_REPOLL_LIMIT,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<Spawn> Runner<Spawn> {
+    /// Creates a [`Future`] task runner.
+    ///
+    /// `repoll_limit` is the maximum times a [`Future`] is polled again
+    /// immediately after polling because of being waken up during polling.
+    pub fn new(repoll_limit: usize) -> Self {
+        Self {
+            repoll_limit,
             _phantom: PhantomData,
         }
     }
@@ -208,15 +223,23 @@ where
         unsafe {
             let waker = ManuallyDrop::new(waker(&*task));
             let mut cx = Context::from_waker(&waker);
+            let mut repoll_times = 0;
             loop {
                 task.status.store(POLLING, SeqCst);
-                if let Poll::Ready(_) = Pin::new(&mut *task.future.get()).poll(&mut cx) {
+                if let Poll::Ready(_) = (&mut *task.future.get()).as_mut().poll(&mut cx) {
                     task.status.store(COMPLETED, SeqCst);
                     return true;
                 }
                 match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
                     Ok(_) => return false,
-                    Err(cur) if cur == NOTIFIED => continue,
+                    Err(NOTIFIED) => {
+                        if repoll_times >= self.repoll_limit {
+                            task.remote.spawn(clone_task(&*task));
+                            return false;
+                        } else {
+                            repoll_times += 1;
+                        }
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -240,10 +263,10 @@ mod tests {
     }
 
     impl MockLocal {
-        fn new() -> MockLocal {
+        fn new(runner: Runner<MockLocal>) -> MockLocal {
             let (task_tx, task_rx) = mpsc::sync_channel(10);
             MockLocal {
-                runner: Rc::new(RefCell::new(Runner::default())),
+                runner: Rc::new(RefCell::new(runner)),
                 task_rx,
                 remote: MockRemote { task_tx },
             }
@@ -255,6 +278,12 @@ mod tests {
                 let runner = self.runner.clone();
                 runner.borrow_mut().handle(self, task_cell);
             }
+        }
+    }
+
+    impl Default for MockLocal {
+        fn default() -> Self {
+            MockLocal::new(Default::default())
         }
     }
 
@@ -314,7 +343,7 @@ mod tests {
     }
 
     fn test_wake_impl(f: impl FnOnce(Waker)) {
-        let mut local = MockLocal::new();
+        let mut local = MockLocal::default();
         let (res_tx, res_rx) = mpsc::channel();
         let (waker_tx, waker_rx) = mpsc::sync_channel(10);
 
@@ -351,32 +380,32 @@ mod tests {
         test_wake_impl(|waker| waker.clone().wake());
     }
 
+    struct PendingOnce {
+        first_poll: bool,
+    }
+
+    impl PendingOnce {
+        fn new() -> PendingOnce {
+            PendingOnce { first_poll: true }
+        }
+    }
+
+    impl Future for PendingOnce {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            if self.first_poll {
+                self.first_poll = false;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }
+    }
+
     #[test]
     fn test_wake_by_self() {
-        struct PendingOnce {
-            first_poll: bool,
-        }
-
-        impl PendingOnce {
-            fn new() -> PendingOnce {
-                PendingOnce { first_poll: true }
-            }
-        }
-
-        impl Future for PendingOnce {
-            type Output = ();
-            fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-                if self.first_poll {
-                    self.first_poll = false;
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                } else {
-                    Poll::Ready(())
-                }
-            }
-        }
-
-        let mut local = MockLocal::new();
+        let mut local = MockLocal::default();
         let (res_tx, res_rx) = mpsc::channel();
 
         let fut = async move {
@@ -389,5 +418,31 @@ mod tests {
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
         assert_eq!(res_rx.recv().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_repoll_limit() {
+        let mut local = MockLocal::new(Runner::new(2));
+        let (res_tx, res_rx) = mpsc::channel();
+
+        let fut = async move {
+            res_tx.send(1).unwrap();
+            PendingOnce::new().await;
+            res_tx.send(2).unwrap();
+            PendingOnce::new().await;
+            res_tx.send(3).unwrap();
+            PendingOnce::new().await;
+            res_tx.send(4).unwrap();
+        };
+        local.spawn(TaskCell::new(fut, local.remote(), ()));
+
+        local.handle_once();
+        assert_eq!(res_rx.recv().unwrap(), 1);
+        assert_eq!(res_rx.recv().unwrap(), 2);
+        assert_eq!(res_rx.recv().unwrap(), 3);
+        assert!(res_rx.try_recv().is_err());
+
+        local.handle_once();
+        assert_eq!(res_rx.recv().unwrap(), 4);
     }
 }
