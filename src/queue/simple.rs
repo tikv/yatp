@@ -9,6 +9,7 @@
 use super::{LocalQueue, Pop, TaskCell, TaskInjector};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
+use rand::prelude::*;
 use std::iter;
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,7 +59,7 @@ pub struct SimpleQueueLocal<T> {
     local_queue: Worker<T>,
     injector: Arc<Injector<T>>,
     stealers: Vec<Stealer<T>>,
-    self_index: usize,
+    rng: SmallRng,
 }
 
 impl<T> LocalQueue for SimpleQueueLocal<T>
@@ -96,10 +97,16 @@ where
                 Steal::Retry => need_retry = true,
                 _ => {}
             }
-            for (i, stealer) in self.stealers.iter().enumerate() {
-                if i == self.self_index {
-                    continue;
-                }
+            // Steal with a random start to avoid imbalance.
+            let len = self.stealers.len();
+            let start_index = self.rng.gen_range(0, len);
+            for stealer in self
+                .stealers
+                .iter()
+                .chain(&self.stealers)
+                .skip(start_index)
+                .take(len)
+            {
                 match stealer.steal_batch_and_pop(&self.local_queue) {
                     Steal::Success(t) => return Some(into_pop(t, false)),
                     Steal::Retry => need_retry = true,
@@ -123,11 +130,19 @@ pub fn create<T>(local_num: usize) -> (SimpleQueueInjector<T>, Vec<SimpleQueueLo
     let local_queues = workers
         .into_iter()
         .enumerate()
-        .map(|(self_index, local_queue)| SimpleQueueLocal {
-            local_queue,
-            injector: injector.clone(),
-            stealers: stealers.clone(),
-            self_index,
+        .map(|(self_index, local_queue)| {
+            let stealers = stealers
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != self_index)
+                .map(|(_, stealer)| stealer.clone())
+                .collect();
+            SimpleQueueLocal {
+                local_queue,
+                injector: injector.clone(),
+                stealers,
+                rng: SmallRng::from_rng(thread_rng()).unwrap(),
+            }
         })
         .collect();
 
