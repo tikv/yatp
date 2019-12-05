@@ -36,20 +36,27 @@ impl<Remote, Extras> fmt::Debug for TaskCell<Remote, Extras> {
     }
 }
 
-const WAITING: u8 = 0; // --> POLLING
-const POLLING: u8 = 1; // --> WAITING, REPOLL, or COMPLETE
-const REPOLL: u8 = 2; // --> POLLING
-const COMPLETE: u8 = 3; // No transitions out
+// When a future task is created or waken up by a waker, it is marked as
+// NOTIFIED. NOTIFIED tasks are ready to be polled. When the runner begins to
+// poll the future, it is marked as POLLING. When the runner finishes polling,
+// the future can either be ready or pending. If the future is ready, it is
+// marked as COMPLETED, or it checks whether it has becomes NOTIFIED. If it is
+// NOTIFIED, it should be polled again immediately. Otherwise it is marked as
+// IDLE.
+const NOTIFIED: u8 = 1;
+const IDLE: u8 = 2;
+const POLLING: u8 = 3;
+const COMPLETED: u8 = 4;
 
 impl<Remote, Extras> TaskCell<Remote, Extras> {
-    /// Creates a [`Future`] task cell.
+    /// Creates a [`Future`] task cell that is ready to be polled.
     pub fn new<F: Future<Output = ()> + Send + 'static>(
         future: F,
         remote: Remote,
         extras: Extras,
     ) -> Self {
         TaskCell(Arc::new(Task {
-            status: AtomicU8::new(WAITING),
+            status: AtomicU8::new(NOTIFIED),
             future: UnsafeCell::new(Box::pin(future)),
             remote,
             extras: UnsafeCell::new(extras),
@@ -114,10 +121,10 @@ where
     let mut status = task.status.load(SeqCst);
     loop {
         match status {
-            WAITING => {
+            IDLE => {
                 match task
                     .status
-                    .compare_exchange(WAITING, POLLING, SeqCst, SeqCst)
+                    .compare_exchange_weak(IDLE, NOTIFIED, SeqCst, SeqCst)
                 {
                     Ok(_) => {
                         task.remote.spawn(clone_task(&**task));
@@ -129,7 +136,7 @@ where
             POLLING => {
                 match task
                     .status
-                    .compare_exchange(POLLING, REPOLL, SeqCst, SeqCst)
+                    .compare_exchange_weak(POLLING, NOTIFIED, SeqCst, SeqCst)
                 {
                     Ok(_) => break,
                     Err(cur) => status = cur,
@@ -199,20 +206,18 @@ where
     fn handle(&mut self, _local: &mut L, task_cell: TaskCell<R, Extras>) -> bool {
         let task = task_cell.0;
         unsafe {
-            task.status.store(POLLING, SeqCst);
             let waker = ManuallyDrop::new(waker(&*task));
             let mut cx = Context::from_waker(&waker);
             loop {
+                task.status.store(POLLING, SeqCst);
                 if let Poll::Ready(_) = Pin::new(&mut *task.future.get()).poll(&mut cx) {
-                    task.status.store(COMPLETE, SeqCst);
+                    task.status.store(COMPLETED, SeqCst);
                     return true;
                 }
-                match task
-                    .status
-                    .compare_exchange(POLLING, WAITING, SeqCst, SeqCst)
-                {
+                match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
                     Ok(_) => return false,
-                    Err(_) => task.status.store(POLLING, SeqCst),
+                    Err(cur) if cur == NOTIFIED => continue,
+                    _ => unreachable!(),
                 }
             }
         }
