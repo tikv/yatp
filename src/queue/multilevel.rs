@@ -23,9 +23,9 @@ const ADJUST_CHANCE_THRESHOLD: u64 = 1_000_000;
 
 // The chance valus below are the numerators of fractions with u32::max_value()
 // as the denominator.
-const INIT_LEVEL0_CHANCE: u32 = 3435973836; // 0.8
+const INIT_LEVEL0_CHANCE: u32 = 3_435_973_836; // 0.8
 const MIN_LEVEL0_CHANCE: u32 = 1 << 31; // 0.5
-const MAX_LEVEL0_CHANCE: u32 = 4209067949; // 0.98
+const MAX_LEVEL0_CHANCE: u32 = 4_209_067_949; // 0.98
 const ADJUST_AMOUNT: u32 = (MAX_LEVEL0_CHANCE - MIN_LEVEL0_CHANCE) / 8; // 0.06
 
 /// The injector of a multilevel task queue.
@@ -344,7 +344,7 @@ impl TaskElapsedMap {
         TaskElapsedMap {
             new_index: AtomicUsize::new(0),
             maps: Default::default(),
-            cleanup_interval: cleanup_interval,
+            cleanup_interval,
             last_cleanup_time: RwLock::new(now()),
             cleaning_up: AtomicBool::new(false),
         }
@@ -460,7 +460,7 @@ impl Builder {
         local_num: usize,
     ) -> (MultilevelQueueInjector<T>, Vec<MultilevelQueueLocal<T>>) {
         let level_injectors: Arc<[Injector<T>; LEVEL_NUM]> =
-            Arc::new(InitWith::init_with(|| Injector::new()));
+            Arc::new(InitWith::init_with(Injector::new));
         let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)
             .take(local_num)
             .collect();
