@@ -3,3 +3,4 @@
 //! Supported tasks.
 
 pub mod callback;
+pub mod future;
