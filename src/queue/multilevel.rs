@@ -44,7 +44,7 @@ impl<T> Clone for MultilevelQueueInjector<T> {
 }
 
 /// The extras for the task cells pushed into a multilevel task queue.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct MultilevelQueueExtras {
     task_id: u64,
     /// The instant when the task cell is pushed to the queue.
@@ -52,6 +52,12 @@ pub struct MultilevelQueueExtras {
     running_time: Option<Arc<ElapsedTime>>,
     current_level: u8,
     fixed_level: Option<u8>,
+}
+
+impl Default for MultilevelQueueExtras {
+    fn default() -> MultilevelQueueExtras {
+        MultilevelQueueExtras::new(thread_rng().next_u64(), None)
+    }
 }
 
 impl MultilevelQueueExtras {
@@ -85,7 +91,6 @@ pub struct MultilevelQueueLocal<T> {
     local_queue: Worker<T>,
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
     stealers: Vec<Stealer<T>>,
-    self_index: usize,
     manager: Arc<LevelManager>,
     rng: SmallRng,
 }
@@ -137,10 +142,16 @@ where
                 Steal::Retry => need_retry = true,
                 _ => {}
             }
-            for (i, stealer) in self.stealers.iter().enumerate() {
-                if i == self.self_index {
-                    continue;
-                }
+            // Steal with a random start to avoid imbalance.
+            let len = self.stealers.len();
+            let start_index = self.rng.gen_range(0, len);
+            for stealer in self
+                .stealers
+                .iter()
+                .chain(&self.stealers)
+                .skip(start_index)
+                .take(len)
+            {
                 match stealer.steal_batch_and_pop(&self.local_queue) {
                     Steal::Success(t) => return Some(into_pop(t, false)),
                     Steal::Retry => need_retry = true,
@@ -321,6 +332,11 @@ impl ElapsedTime {
     fn inc_by(&self, t: Duration) -> u64 {
         self.0.fetch_add(t.as_micros() as u64, SeqCst)
     }
+
+    #[cfg(test)]
+    fn from_duration(dur: Duration) -> Self {
+        ElapsedTime(AtomicU64::new(dur.as_micros() as u64))
+    }
 }
 
 thread_local!(static TLS_LAST_CLEANUP_TIME: Cell<Instant> = Cell::new(Instant::now()));
@@ -468,13 +484,20 @@ impl Builder {
         let local_queues = workers
             .into_iter()
             .enumerate()
-            .map(|(self_index, local_queue)| MultilevelQueueLocal {
-                local_queue,
-                level_injectors: level_injectors.clone(),
-                stealers: stealers.clone(),
-                self_index,
-                manager: self.manager.clone(),
-                rng: SmallRng::from_rng(thread_rng()).unwrap(),
+            .map(|(self_index, local_queue)| {
+                let stealers = stealers
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != self_index)
+                    .map(|(_, stealer)| stealer.clone())
+                    .collect();
+                MultilevelQueueLocal {
+                    local_queue,
+                    level_injectors: level_injectors.clone(),
+                    stealers,
+                    manager: self.manager.clone(),
+                    rng: SmallRng::from_rng(thread_rng()).unwrap(),
+                }
             })
             .collect();
 
@@ -503,6 +526,7 @@ fn recent() -> Instant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::{LocalSpawn, RemoteSpawn};
 
     use std::thread;
 
@@ -543,5 +567,236 @@ mod tests {
 
         // After two cleanups, we won't be able to read the old stats with id = 1
         assert_eq!(map.get_elapsed(1).as_duration(), Duration::from_secs(0));
+    }
+
+    #[derive(Default)]
+    struct MockSpawn;
+
+    impl LocalSpawn for MockSpawn {
+        type TaskCell = MockTask;
+        type Remote = MockSpawn;
+
+        fn spawn(&mut self, _t: MockTask) {}
+
+        fn remote(&self) -> Self::Remote {
+            unimplemented!()
+        }
+    }
+
+    impl RemoteSpawn for MockSpawn {
+        type TaskCell = MockTask;
+
+        fn spawn(&self, _t: MockTask) {}
+    }
+
+    #[derive(Debug)]
+    struct MockTask {
+        sleep_ms: u64,
+        extras: MultilevelQueueExtras,
+    }
+
+    impl MockTask {
+        fn new(sleep_ms: u64, extras: MultilevelQueueExtras) -> Self {
+            MockTask { sleep_ms, extras }
+        }
+    }
+
+    impl TaskCell for MockTask {
+        type Extras = MultilevelQueueExtras;
+
+        fn mut_extras(&mut self) -> &mut MultilevelQueueExtras {
+            &mut self.extras
+        }
+    }
+
+    struct MockRunner;
+
+    impl Runner for MockRunner {
+        type Spawn = MockSpawn;
+
+        fn handle(&mut self, _spawn: &mut Self::Spawn, task_cell: MockTask) -> bool {
+            thread::sleep(Duration::from_millis(task_cell.sleep_ms));
+            true
+        }
+    }
+
+    struct MockRunnerBuilder;
+
+    impl RunnerBuilder for MockRunnerBuilder {
+        type Runner = MockRunner;
+
+        fn build(&mut self) -> MockRunner {
+            MockRunner
+        }
+    }
+
+    #[test]
+    fn test_schedule_time_is_set() {
+        const SLEEP_DUR: Duration = Duration::from_millis(5);
+
+        let builder = Builder::new(Config::default());
+        let (injector, mut locals) = builder.build(1);
+        injector.push(MockTask::new(0, Default::default()));
+        thread::sleep(SLEEP_DUR);
+        let schedule_time = locals[0].pop().unwrap().schedule_time;
+        assert!(schedule_time.elapsed() >= SLEEP_DUR);
+    }
+
+    #[test]
+    fn test_push_task() {
+        let builder = Builder::new(
+            Config::default()
+                .level_time_threshold([Duration::from_millis(1), Duration::from_millis(100)]),
+        );
+        let (injector, _) = builder.build(1);
+
+        // Running time is 50us. It should be pushed to level 0.
+        let extras = MultilevelQueueExtras {
+            running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_micros(
+                50,
+            )))),
+            ..Default::default()
+        };
+        injector.push(MockTask::new(1, extras));
+        assert_eq!(
+            injector.level_injectors[0]
+                .steal()
+                .success()
+                .unwrap()
+                .sleep_ms,
+            1
+        );
+
+        // Running time is 10ms. It should be pushed to level 1.
+        let extras = MultilevelQueueExtras {
+            running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_millis(
+                10,
+            )))),
+            ..Default::default()
+        };
+        injector.push(MockTask::new(2, extras));
+        assert_eq!(
+            injector.level_injectors[1]
+                .steal()
+                .success()
+                .unwrap()
+                .sleep_ms,
+            2
+        );
+
+        // Running time is 1s. It should be pushed to level 2.
+        let extras = MultilevelQueueExtras {
+            running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_secs(1)))),
+            ..Default::default()
+        };
+        injector.push(MockTask::new(3, extras));
+        assert_eq!(
+            injector.level_injectors[2]
+                .steal()
+                .success()
+                .unwrap()
+                .sleep_ms,
+            3
+        );
+
+        // Fixed level is set. It should be pushed to the set level.
+        let extras = MultilevelQueueExtras {
+            running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_secs(1)))),
+            fixed_level: Some(1),
+            ..Default::default()
+        };
+        injector.push(MockTask::new(4, extras));
+        assert_eq!(
+            injector.level_injectors[1]
+                .steal()
+                .success()
+                .unwrap()
+                .sleep_ms,
+            4
+        );
+    }
+
+    #[test]
+    fn test_pop_by_stealing_injector() {
+        let builder = Builder::new(Config::default());
+        let (injector, mut locals) = builder.build(3);
+        for i in 0..100 {
+            injector.push(MockTask::new(i, Default::default()));
+        }
+        let sum: u64 = (0..100)
+            .map(|_| locals[2].pop().unwrap().task_cell.sleep_ms)
+            .sum();
+        assert_eq!(sum, (0..100).sum());
+        assert!(locals.iter_mut().all(|c| c.pop().is_none()));
+    }
+
+    #[test]
+    fn test_pop_by_steal_others() {
+        let builder = Builder::new(Config::default());
+        let (injector, mut locals) = builder.build(3);
+        for i in 0..50 {
+            injector.push(MockTask::new(i, Default::default()));
+        }
+        assert!(injector.level_injectors[0]
+            .steal_batch(&locals[0].local_queue)
+            .is_success());
+        for i in 50..100 {
+            injector.push(MockTask::new(i, Default::default()));
+        }
+        assert!(injector.level_injectors[0]
+            .steal_batch(&locals[1].local_queue)
+            .is_success());
+        let sum: u64 = (0..100)
+            .map(|_| locals[2].pop().unwrap().task_cell.sleep_ms)
+            .sum();
+        assert_eq!(sum, (0..100).sum());
+        assert!(locals.iter_mut().all(|c| c.pop().is_none()));
+    }
+
+    #[test]
+    fn test_pop_concurrently() {
+        let builder = Builder::new(Config::default());
+        let (injector, locals) = builder.build(3);
+        for i in 0..10_000 {
+            injector.push(MockTask::new(i, Default::default()));
+        }
+        let sum = Arc::new(AtomicU64::new(0));
+        let handles: Vec<_> = locals
+            .into_iter()
+            .map(|mut consumer| {
+                let sum = sum.clone();
+                thread::spawn(move || {
+                    while let Some(pop) = consumer.pop() {
+                        sum.fetch_add(pop.task_cell.sleep_ms, SeqCst);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            let _ = handle.join();
+        }
+        assert_eq!(sum.load(SeqCst), (0..10_000).sum());
+    }
+
+    #[test]
+    fn test_runner_records_handle_time() {
+        let builder = Builder::new(Config::default());
+        let mut runner_builder = builder.runner_builder(MockRunnerBuilder);
+        let (injector, mut locals) = builder.build(1);
+        let mut runner = runner_builder.build();
+        let mut spawn = MockSpawn;
+
+        injector.push(MockTask::new(100, MultilevelQueueExtras::new(42, None)));
+        if let Some(Pop { task_cell, .. }) = locals[0].pop() {
+            assert!(runner.handle(&mut spawn, task_cell));
+        }
+        assert!(
+            injector
+                .manager
+                .task_elapsed_map
+                .get_elapsed(42)
+                .as_duration()
+                >= Duration::from_millis(100)
+        );
     }
 }
