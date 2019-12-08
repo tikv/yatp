@@ -46,15 +46,21 @@ impl<T> Clone for MultilevelQueueInjector<T> {
 /// The extras for the task cells pushed into a multilevel task queue.
 #[derive(Debug, Clone)]
 pub struct MultilevelQueueExtras {
+    /// The identifier of the task.
     task_id: u64,
     /// The instant when the task cell is pushed to the queue.
     schedule_time: Option<Instant>,
+    /// The time spent on handling this task.
     running_time: Option<Arc<ElapsedTime>>,
+    /// The level of queue which this task comes from.
     current_level: u8,
+    /// If `fixed_level` is `Some`, this task is always pushed to the given level.
     fixed_level: Option<u8>,
 }
 
 impl Default for MultilevelQueueExtras {
+    /// Creates a default [`MultilevelQueueExtras`]. It generates a random task id
+    /// and does not specify the fixed level.
     fn default() -> MultilevelQueueExtras {
         MultilevelQueueExtras::new(thread_rng().next_u64(), None)
     }
@@ -201,6 +207,10 @@ where
     }
 }
 
+/// The runner for multilevel task queues.
+///
+/// This runner helps multilevel task queues collect additional information.
+/// So if a multilevel task queue is used, you must also use this runner.
 pub struct MultilevelRunner<R> {
     inner: R,
     manager: Arc<LevelManager>,
@@ -413,19 +423,27 @@ impl TaskElapsedMap {
     }
 }
 
-/// The config of multilevel task queues.
+/// The configurations of multilevel task queues.
 pub struct Config {
     level_time_threshold: [Duration; LEVEL_NUM - 1],
     level0_proportion_target: f64,
 }
 
 impl Config {
+    /// Sets the time threshold of each level. It decides which level a task is
+    /// pushed into.
     #[inline]
     pub fn level_time_threshold(mut self, value: [Duration; LEVEL_NUM - 1]) -> Self {
         self.level_time_threshold = value;
         self
     }
 
+    /// Sets the target proportion of time used by level 0 tasks.
+    ///
+    /// For example, if the value is set to `0.8`, the queue will try to let level 0
+    /// tasks occupy 80% running time.
+    ///
+    /// The default value is `0.8`.
     #[inline]
     pub fn level0_proportion_target(mut self, value: f64) -> Self {
         self.level0_proportion_target = value;
