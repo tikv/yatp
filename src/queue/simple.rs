@@ -99,18 +99,20 @@ where
             }
             // Steal with a random start to avoid imbalance.
             let len = self.stealers.len();
-            let start_index = self.rng.gen_range(0, len);
-            for stealer in self
-                .stealers
-                .iter()
-                .chain(&self.stealers)
-                .skip(start_index)
-                .take(len)
-            {
-                match stealer.steal_batch_and_pop(&self.local_queue) {
-                    Steal::Success(t) => return Some(into_pop(t, false)),
-                    Steal::Retry => need_retry = true,
-                    _ => {}
+            if len > 0 {
+                let start_index = self.rng.gen_range(0, len);
+                for stealer in self
+                    .stealers
+                    .iter()
+                    .chain(&self.stealers)
+                    .skip(start_index)
+                    .take(len)
+                {
+                    match stealer.steal_batch_and_pop(&self.local_queue) {
+                        Steal::Success(t) => return Some(into_pop(t, false)),
+                        Steal::Retry => need_retry = true,
+                        _ => {}
+                    }
                 }
             }
             if !need_retry {
