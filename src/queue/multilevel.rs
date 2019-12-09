@@ -1,6 +1,11 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! A multilevel feedback task queue.
+//! A multilevel feedback task queue. Long-running tasks are pushed to levels
+//! with lower priority.
+//!
+//! The task queue requires [`TaskCell`] to contain [`MultilevelQueueExtras`]
+//! as its extras. Additionally, the accompanying [`MultilevelRunner`] must be
+//! used to collect necessary information.
 
 use super::{LocalQueue, Pop, TaskCell, TaskInjector};
 use crate::runner::{LocalSpawn, Runner, RunnerBuilder};
@@ -150,18 +155,20 @@ where
             }
             // Steal with a random start to avoid imbalance.
             let len = self.stealers.len();
-            let start_index = self.rng.gen_range(0, len);
-            for stealer in self
-                .stealers
-                .iter()
-                .chain(&self.stealers)
-                .skip(start_index)
-                .take(len)
-            {
-                match stealer.steal_batch_and_pop(&self.local_queue) {
-                    Steal::Success(t) => return Some(into_pop(t, false)),
-                    Steal::Retry => need_retry = true,
-                    _ => {}
+            if len > 0 {
+                let start_index = self.rng.gen_range(0, len);
+                for stealer in self
+                    .stealers
+                    .iter()
+                    .chain(&self.stealers)
+                    .skip(start_index)
+                    .take(len)
+                {
+                    match stealer.steal_batch_and_pop(&self.local_queue) {
+                        Steal::Success(t) => return Some(into_pop(t, false)),
+                        Steal::Retry => need_retry = true,
+                        _ => {}
+                    }
                 }
             }
             for injector in self
@@ -185,6 +192,8 @@ where
 }
 
 /// The runner builder for multilevel task queues.
+///
+/// It can be created by [`Builder::runner_builder`].
 pub struct MultilevelRunnerBuilder<B> {
     inner: B,
     manager: Arc<LevelManager>,
@@ -209,8 +218,8 @@ where
 
 /// The runner for multilevel task queues.
 ///
-/// This runner helps multilevel task queues collect additional information.
-/// So if a multilevel task queue is used, you must also use this runner.
+/// The runner helps multilevel task queues collect additional information.
+/// [`MultilevelRunnerBuilder`] is the [`RunnerBuilder`] for this runner.
 pub struct MultilevelRunner<R> {
     inner: R,
     manager: Arc<LevelManager>,
