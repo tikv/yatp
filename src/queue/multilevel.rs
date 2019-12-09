@@ -22,11 +22,21 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 const LEVEL_NUM: usize = 3;
-const CHANCE_RATIO: u32 = 4;
-const DEFAULT_CLEANUP_OLD_MAP_INTERVAL: Duration = Duration::from_secs(10);
-const ADJUST_CHANCE_THRESHOLD: u64 = 1_000_000;
 
-// The chance valus below are the numerators of fractions with u32::max_value()
+/// The chance ratio of level 1 and level 2 tasks.
+const CHANCE_RATIO: u32 = 4;
+
+const DEFAULT_CLEANUP_OLD_MAP_INTERVAL: Duration = Duration::from_secs(10);
+
+/// When total elapsed time exceeds this value, it will try to adjust level
+/// chances and reset the total elapsed time.
+const ADJUST_CHANCE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// When the deviation between the target and the actual level 0 proportion
+/// exceeds this value, level chances need to be adjusted.
+const ADJUST_CHANCE_THRESHOLD: f64 = 0.05;
+
+// The chance values below are the numerators of fractions with u32::max_value()
 // as the denominator.
 const INIT_LEVEL0_CHANCE: u32 = 3_435_973_836; // 0.8
 const MIN_LEVEL0_CHANCE: u32 = 1 << 31; // 0.5
@@ -254,8 +264,10 @@ where
         if level == 0 {
             self.manager.level0_elapsed.inc_by(elapsed);
         }
-        let current_total = self.manager.total_elapsed.inc_by(elapsed) + elapsed.as_micros() as u64;
-        if current_total > ADJUST_CHANCE_THRESHOLD {
+        let current_total = Duration::from_micros(
+            self.manager.total_elapsed.inc_by(elapsed) + elapsed.as_micros() as u64,
+        );
+        if current_total > ADJUST_CHANCE_INTERVAL {
             self.manager.maybe_adjust_chance();
         }
         res
@@ -320,17 +332,22 @@ impl LevelManager {
         }
         // The statistics may be not so accurate because we cannot load two
         // atomics at the same time.
-        let level0 = self.level0_elapsed.0.load(SeqCst);
         let total = self.total_elapsed.0.load(SeqCst);
+        if Duration::from_micros(total) < ADJUST_CHANCE_INTERVAL {
+            // Another thread just adjusted the chances.
+            return;
+        }
+        let total = self.total_elapsed.0.swap(0, SeqCst);
+        let level0 = self.level0_elapsed.0.swap(0, SeqCst);
         let current_proportion = level0 as f64 / total as f64;
         let diff = self.level0_proportion_target - current_proportion;
         let level0_chance = self.level0_chance.load(SeqCst);
-        let new_chance = if diff > 0.05 {
+        let new_chance = if diff > ADJUST_CHANCE_THRESHOLD {
             cmp::min(
                 level0_chance.saturating_add(ADJUST_AMOUNT),
                 MAX_LEVEL0_CHANCE,
             )
-        } else if diff < -0.05 {
+        } else if diff < -ADJUST_CHANCE_THRESHOLD {
             cmp::max(level0_chance - ADJUST_AMOUNT, MIN_LEVEL0_CHANCE)
         } else {
             level0_chance
@@ -439,7 +456,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Sets the time threshold of each level. It decides which level a task is
+    /// Sets the time threshold of each level. It decides which level a task should be
     /// pushed into.
     #[inline]
     pub fn level_time_threshold(mut self, value: [Duration; LEVEL_NUM - 1]) -> Self {
@@ -540,12 +557,18 @@ impl Builder {
 
 thread_local!(static RECENT_NOW: Cell<Instant> = Cell::new(Instant::now()));
 
+/// Returns an instant corresponding to now and updates the thread-local recent
+/// now.
+///
+/// You should only use it when the thread-local recent now is recently updated.
 fn now() -> Instant {
     let res = Instant::now();
     RECENT_NOW.with(|r| r.set(res));
     res
 }
 
+/// Returns the thread-local recent now. It is used to save the cost of calling
+/// `Instant::now` frequently.
 fn recent() -> Instant {
     RECENT_NOW.with(|r| r.get())
 }
@@ -825,5 +848,38 @@ mod tests {
                 .as_duration()
                 >= Duration::from_millis(100)
         );
+    }
+
+    #[test]
+    fn test_adjust_level_chance() {
+        // Default level 0 target is 0.8
+        let manager = Builder::new(Config::default()).manager;
+
+        // Level 0 running time is lower than expected, level0_chance should
+        // increase.
+        let level0_chance_before = manager.get_level0_chance();
+        manager.level0_elapsed.inc_by(Duration::from_millis(500));
+        manager.total_elapsed.inc_by(Duration::from_millis(1500));
+        manager.maybe_adjust_chance();
+        let level0_chance_after = manager.get_level0_chance();
+        assert!(level0_chance_before < level0_chance_after);
+
+        // Level 0 running time is higher than expected, level0_chance should
+        // decrease.
+        let level0_chance_before = manager.get_level0_chance();
+        manager.level0_elapsed.inc_by(Duration::from_millis(1400));
+        manager.total_elapsed.inc_by(Duration::from_millis(1500));
+        manager.maybe_adjust_chance();
+        let level0_chance_after = manager.get_level0_chance();
+        assert!(level0_chance_before > level0_chance_after);
+
+        // Level 0 running time is roughly equivalent to expected,
+        // level0_chance should not change.
+        let level0_chance_before = manager.get_level0_chance();
+        manager.level0_elapsed.inc_by(Duration::from_millis(1210));
+        manager.total_elapsed.inc_by(Duration::from_millis(1500));
+        manager.maybe_adjust_chance();
+        let level0_chance_after = manager.get_level0_chance();
+        assert_eq!(level0_chance_before, level0_chance_after);
     }
 }
