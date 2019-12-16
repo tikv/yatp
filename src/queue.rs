@@ -8,6 +8,8 @@
 //! which make it possible to do extreme optimizations and define complicated
 //! data structs.
 
+pub mod simple;
+
 use std::time::Instant;
 
 /// A cell containing a task and needed extra information.
