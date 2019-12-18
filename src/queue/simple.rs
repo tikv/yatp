@@ -7,6 +7,7 @@
 //! is recorded in the extras.
 
 use super::{LocalQueue, Pop, TaskCell, TaskInjector};
+use crate::queue::Extras;
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use rand::prelude::*;
@@ -15,68 +16,54 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// The injector of a simple task queue.
-pub struct SimpleQueueInjector<T>(Arc<Injector<T>>);
+pub struct QueueInjector<T>(Arc<Injector<T>>);
 
-impl<T: TaskCell> Clone for SimpleQueueInjector<T> {
+impl<T: TaskCell> Clone for QueueInjector<T> {
     fn clone(&self) -> Self {
-        SimpleQueueInjector(self.0.clone())
+        QueueInjector(self.0.clone())
     }
-}
-
-/// The extras for the task cells pushed into a simple task queue.
-///
-/// [`Default::default`] can be used to create a [`SimpleQueueExtras`] for
-/// a task cell.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SimpleQueueExtras {
-    /// The instant when the task cell is pushed to the queue.
-    schedule_time: Option<Instant>,
 }
 
 fn set_schedule_time<T>(task_cell: &mut T)
 where
-    T: TaskCell<Extras = SimpleQueueExtras>,
+    T: TaskCell,
 {
     task_cell.mut_extras().schedule_time = Some(Instant::now());
 }
 
-impl<T> TaskInjector for SimpleQueueInjector<T>
+impl<T> QueueInjector<T>
 where
-    T: TaskCell<Extras = SimpleQueueExtras>,
+    T: TaskCell + Send,
 {
-    type TaskCell = T;
-
     /// Pushes the task cell to the queue. The schedule time in the extras is
     /// assigned to be now.
-    fn push(&self, mut task_cell: Self::TaskCell) {
+    pub fn push(&self, mut task_cell: T) {
         set_schedule_time(&mut task_cell);
         self.0.push(task_cell);
     }
 }
 
 /// The local queue of a simple task queue.
-pub struct SimpleQueueLocal<T> {
+pub struct QueueLocal<T> {
     local_queue: Worker<T>,
     injector: Arc<Injector<T>>,
     stealers: Vec<Stealer<T>>,
     rng: SmallRng,
 }
 
-impl<T> LocalQueue for SimpleQueueLocal<T>
+impl<T> QueueLocal<T>
 where
-    T: TaskCell<Extras = SimpleQueueExtras>,
+    T: TaskCell,
 {
-    type TaskCell = T;
-
-    fn push(&mut self, mut task_cell: Self::TaskCell) {
+    pub fn push(&mut self, mut task_cell: T) {
         set_schedule_time(&mut task_cell);
         self.local_queue.push(task_cell);
     }
 
-    fn pop(&mut self) -> Option<Pop<Self::TaskCell>> {
+    pub fn pop(&mut self) -> Option<Pop<T>> {
         fn into_pop<T>(mut t: T, from_local: bool) -> Pop<T>
         where
-            T: TaskCell<Extras = SimpleQueueExtras>,
+            T: TaskCell,
         {
             let schedule_time = t.mut_extras().schedule_time.unwrap();
             Pop {
@@ -123,7 +110,7 @@ where
 }
 
 /// Creates a simple task queue with `local_num` local queues.
-pub fn create<T>(local_num: usize) -> (SimpleQueueInjector<T>, Vec<SimpleQueueLocal<T>>) {
+pub fn create<T>(local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
     let injector = Arc::new(Injector::new());
     let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)
         .take(local_num)
@@ -139,7 +126,7 @@ pub fn create<T>(local_num: usize) -> (SimpleQueueInjector<T>, Vec<SimpleQueueLo
                 .filter(|(index, _)| *index != self_index)
                 .map(|(_, stealer)| stealer.clone())
                 .collect();
-            SimpleQueueLocal {
+            QueueLocal {
                 local_queue,
                 injector: injector.clone(),
                 stealers,
@@ -148,7 +135,7 @@ pub fn create<T>(local_num: usize) -> (SimpleQueueInjector<T>, Vec<SimpleQueueLo
         })
         .collect();
 
-    (SimpleQueueInjector(injector), local_queues)
+    (QueueInjector(injector), local_queues)
 }
 
 #[cfg(test)]
@@ -162,7 +149,7 @@ mod tests {
     #[derive(Debug)]
     struct MockCell {
         value: i32,
-        extras: SimpleQueueExtras,
+        extras: Extras,
     }
 
     impl MockCell {
@@ -175,9 +162,7 @@ mod tests {
     }
 
     impl TaskCell for MockCell {
-        type Extras = SimpleQueueExtras;
-
-        fn mut_extras(&mut self) -> &mut SimpleQueueExtras {
+        fn mut_extras(&mut self) -> &mut Extras {
             &mut self.extras
         }
     }

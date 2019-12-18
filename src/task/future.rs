@@ -3,6 +3,7 @@
 //! A [`Future`].
 
 use crate::{LocalSpawn, RemoteSpawn};
+use crate::queue::Extras;
 
 use std::cell::UnsafeCell;
 use std::future::Future;
@@ -19,7 +20,7 @@ use std::{fmt, mem};
 const DEFAULT_REPOLL_LIMIT: usize = 5;
 
 /// A [`Future`] task.
-pub struct Task<Remote, Extras> {
+pub struct Task<Remote> {
     status: AtomicU8,
     future: UnsafeCell<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
     remote: Remote,
@@ -27,13 +28,13 @@ pub struct Task<Remote, Extras> {
 }
 
 /// A [`Future`] task cell.
-pub struct TaskCell<Remote, Extras>(Arc<Task<Remote, Extras>>);
+pub struct TaskCell<Remote>(Arc<Task<Remote>>);
 
 // Safety: It is ensured that `future` and `extras` are always accessed by
 // only one thread at the same time.
-unsafe impl<Remote: Sync, Extras> Sync for Task<Remote, Extras> {}
+unsafe impl<Remote: Sync> Sync for Task<Remote> {}
 
-impl<Remote, Extras> fmt::Debug for TaskCell<Remote, Extras> {
+impl<Remote> fmt::Debug for TaskCell<Remote> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         "future::TaskCell".fmt(f)
@@ -52,7 +53,7 @@ const IDLE: u8 = 2;
 const POLLING: u8 = 3;
 const COMPLETED: u8 = 4;
 
-impl<Remote, Extras> TaskCell<Remote, Extras> {
+impl<Remote> TaskCell<Remote> {
     /// Creates a [`Future`] task cell that is ready to be polled.
     pub fn new<F: Future<Output = ()> + Send + 'static>(
         future: F,
@@ -68,58 +69,56 @@ impl<Remote, Extras> TaskCell<Remote, Extras> {
     }
 }
 
-impl<Remote, Extras> crate::queue::TaskCell for TaskCell<Remote, Extras> {
-    type Extras = Extras;
-
-    fn mut_extras(&mut self) -> &mut Self::Extras {
+impl<Remote> crate::queue::TaskCell for TaskCell<Remote> {
+    fn mut_extras(&mut self) -> &mut Extras {
         unsafe { &mut *self.0.extras.get() }
     }
 }
 
 #[inline]
-unsafe fn waker<Remote, Extras>(task: *const Task<Remote, Extras>) -> Waker
+unsafe fn waker<Remote>(task: *const Task<Remote>) -> Waker
 where
-    Remote: RemoteSpawn<TaskCell = TaskCell<Remote, Extras>>,
+    Remote: RemoteSpawn<TaskCell = TaskCell<Remote>>,
 {
     Waker::from_raw(RawWaker::new(
         task as *const (),
         &RawWakerVTable::new(
-            clone_raw::<Remote, Extras>,
-            wake_raw::<Remote, Extras>,
-            wake_ref_raw::<Remote, Extras>,
-            drop_raw::<Remote, Extras>,
+            clone_raw::<Remote>,
+            wake_raw::<Remote>,
+            wake_ref_raw::<Remote>,
+            drop_raw::<Remote>,
         ),
     ))
 }
 
 #[inline]
-unsafe fn clone_raw<Remote, Extras>(this: *const ()) -> RawWaker
+unsafe fn clone_raw<Remote>(this: *const ()) -> RawWaker
 where
-    Remote: RemoteSpawn<TaskCell = TaskCell<Remote, Extras>>,
+    Remote: RemoteSpawn<TaskCell = TaskCell<Remote>>,
 {
-    let task_cell = clone_task(this as *const Task<Remote, Extras>);
+    let task_cell = clone_task(this as *const Task<Remote>);
     RawWaker::new(
         Arc::into_raw(task_cell.0) as *const (),
         &RawWakerVTable::new(
-            clone_raw::<Remote, Extras>,
-            wake_raw::<Remote, Extras>,
-            wake_ref_raw::<Remote, Extras>,
-            drop_raw::<Remote, Extras>,
+            clone_raw::<Remote>,
+            wake_raw::<Remote>,
+            wake_ref_raw::<Remote>,
+            drop_raw::<Remote>,
         ),
     )
 }
 
 #[inline]
-unsafe fn drop_raw<Remote, Extras>(this: *const ())
+unsafe fn drop_raw<Remote>(this: *const ())
 where
-    Remote: RemoteSpawn<TaskCell = TaskCell<Remote, Extras>>,
+    Remote: RemoteSpawn<TaskCell = TaskCell<Remote>>,
 {
-    drop(task_cell(this as *const Task<Remote, Extras>))
+    drop(task_cell(this as *const Task<Remote>))
 }
 
-unsafe fn wake_impl<Remote, Extras>(task_cell: &TaskCell<Remote, Extras>)
+unsafe fn wake_impl<Remote>(task_cell: &TaskCell<Remote>)
 where
-    Remote: RemoteSpawn<TaskCell = TaskCell<Remote, Extras>>,
+    Remote: RemoteSpawn<TaskCell = TaskCell<Remote>>,
 {
     let task = &task_cell.0;
     let mut status = task.status.load(SeqCst);
@@ -152,32 +151,32 @@ where
 }
 
 #[inline]
-unsafe fn wake_raw<Remote, Extras>(this: *const ())
+unsafe fn wake_raw<Remote>(this: *const ())
 where
-    Remote: RemoteSpawn<TaskCell = TaskCell<Remote, Extras>>,
+    Remote: RemoteSpawn<TaskCell = TaskCell<Remote>>,
 {
-    let task_cell = task_cell(this as *const Task<Remote, Extras>);
+    let task_cell = task_cell(this as *const Task<Remote>);
     wake_impl(&task_cell);
 }
 
 #[inline]
-unsafe fn wake_ref_raw<Remote, Extras>(this: *const ())
+unsafe fn wake_ref_raw<Remote>(this: *const ())
 where
-    Remote: RemoteSpawn<TaskCell = TaskCell<Remote, Extras>>,
+    Remote: RemoteSpawn<TaskCell = TaskCell<Remote>>,
 {
-    let task_cell = ManuallyDrop::new(task_cell(this as *const Task<Remote, Extras>));
+    let task_cell = ManuallyDrop::new(task_cell(this as *const Task<Remote>));
     wake_impl(&task_cell);
 }
 
 #[inline]
-unsafe fn task_cell<Remote, Extras>(task: *const Task<Remote, Extras>) -> TaskCell<Remote, Extras> {
+unsafe fn task_cell<Remote>(task: *const Task<Remote>) -> TaskCell<Remote> {
     TaskCell(Arc::from_raw(task))
 }
 
 #[inline]
-unsafe fn clone_task<Remote, Extras>(
-    task: *const Task<Remote, Extras>,
-) -> TaskCell<Remote, Extras> {
+unsafe fn clone_task<Remote>(
+    task: *const Task<Remote>,
+) -> TaskCell<Remote> {
     let task_cell = task_cell(task);
     mem::forget(task_cell.0.clone());
     task_cell
@@ -211,14 +210,14 @@ impl<Spawn> Runner<Spawn> {
     }
 }
 
-impl<L, R, Extras> crate::Runner for Runner<L>
+impl<L, R> crate::Runner for Runner<L>
 where
-    L: LocalSpawn<TaskCell = TaskCell<R, Extras>, Remote = R>,
-    R: RemoteSpawn<TaskCell = TaskCell<R, Extras>>,
+    L: LocalSpawn<TaskCell = TaskCell<R>, Remote = R>,
+    R: RemoteSpawn<TaskCell = TaskCell<R>>,
 {
     type Spawn = L;
 
-    fn handle(&mut self, _local: &mut L, task_cell: TaskCell<R, Extras>) -> bool {
+    fn handle(&mut self, _local: &mut L, task_cell: TaskCell<R>) -> bool {
         let task = task_cell.0;
         unsafe {
             let waker = ManuallyDrop::new(waker(&*task));
@@ -258,7 +257,7 @@ mod tests {
 
     struct MockLocal {
         runner: Rc<RefCell<Runner<MockLocal>>>,
-        task_rx: mpsc::Receiver<TaskCell<MockRemote, ()>>,
+        task_rx: mpsc::Receiver<TaskCell<MockRemote>>,
         remote: MockRemote,
     }
 
@@ -289,14 +288,14 @@ mod tests {
 
     #[derive(Clone)]
     struct MockRemote {
-        task_tx: mpsc::SyncSender<TaskCell<MockRemote, ()>>,
+        task_tx: mpsc::SyncSender<TaskCell<MockRemote>>,
     }
 
     impl LocalSpawn for MockLocal {
-        type TaskCell = TaskCell<MockRemote, ()>;
+        type TaskCell = TaskCell<MockRemote>;
         type Remote = MockRemote;
 
-        fn spawn(&mut self, task_cell: TaskCell<MockRemote, ()>) {
+        fn spawn(&mut self, task_cell: TaskCell<MockRemote>) {
             self.remote.task_tx.send(task_cell).unwrap();
         }
 
@@ -306,9 +305,9 @@ mod tests {
     }
 
     impl RemoteSpawn for MockRemote {
-        type TaskCell = TaskCell<MockRemote, ()>;
+        type TaskCell = TaskCell<MockRemote>;
 
-        fn spawn(&self, task_cell: TaskCell<MockRemote, ()>) {
+        fn spawn(&self, task_cell: TaskCell<MockRemote>) {
             self.task_tx.send(task_cell).unwrap();
         }
     }
@@ -352,7 +351,7 @@ mod tests {
             WakeLater::new(waker_tx.clone()).await;
             res_tx.send(2).unwrap();
         };
-        local.spawn(TaskCell::new(fut, local.remote(), ()));
+        local.spawn(TaskCell::new(fut, local.remote(), Default::default()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -413,7 +412,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(2).unwrap();
         };
-        local.spawn(TaskCell::new(fut, local.remote(), ()));
+        local.spawn(TaskCell::new(fut, local.remote(), Default::default()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -434,7 +433,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(4).unwrap();
         };
-        local.spawn(TaskCell::new(fut, local.remote(), ()));
+        local.spawn(TaskCell::new(fut, local.remote(), Default::default()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);

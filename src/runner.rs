@@ -72,6 +72,14 @@ pub trait LocalSpawn {
     /// Spawns a task into the thread pool.
     fn spawn(&mut self, task: Self::TaskCell);
 
+    /// Spawns a task into the remote queue explicitly.
+    ///
+    /// It works just like `.remote().spawn()`, but may save the cost of
+    /// constructing remote.
+    fn spawn_remote(&self, task: Self::TaskCell) {
+        self.remote().spawn(task)
+    }
+
     /// Gets a remote instance to allow spawn task back to the pool.
     fn remote(&self) -> Self::Remote;
 }
@@ -83,4 +91,14 @@ pub trait RunnerBuilder {
 
     /// Builds a runner.
     fn build(&mut self) -> Self::Runner;
+}
+
+pub struct CloneRunnerBuilder<R>(pub R);
+
+impl<R: Runner + Clone> RunnerBuilder for CloneRunnerBuilder<R> {
+    type Runner = R;
+
+    fn build(&mut self) -> R {
+        self.0.clone()
+    }
 }

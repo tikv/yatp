@@ -10,5 +10,7 @@ mod runner;
 pub mod queue;
 pub mod task;
 
-pub use self::pool::{Builder, Remote, ThreadPool};
+pub use self::pool::builder::Builder;
+pub use self::pool::worker::Remote;
+pub use self::pool::ThreadPool;
 pub use self::runner::{LocalSpawn, RemoteSpawn, Runner};

@@ -10,5 +10,6 @@ repository = "https://github.com/tikv/yatp/"
 
 [dependencies]
 num_cpus = "1.0"
+parking_lot_core = "0.7"
 crossbeam-deque = "0.7"
 rand = { version = "0.7", features = ["small_rng"] }
