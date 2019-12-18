@@ -1,9 +1,9 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::queue::{LocalQueue, TaskInjector};
+use crate::queue::{LocalQueue, TaskCell, TaskInjector};
 use crate::runner::{Runner, RunnerBuilder};
 use std::mem;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -30,32 +30,28 @@ pub(crate) struct SchedConfig {
 }
 
 /// A builder for lazy spawning.
-pub struct LazyBuilder<I, L> {
+pub struct LazyBuilder<T> {
     builder: Builder,
-    injector: I,
-    local_queues: Vec<L>,
+    injector: Arc<TaskInjector<T>>,
+    local_queues: Vec<LocalQueue<T>>,
 }
 
-impl<I, L> LazyBuilder<I, L> {
+impl<T> LazyBuilder<T> {
     /// Sets the name prefix of threads. The thread name will follow the
     /// format "prefix-index".
-    pub fn name(mut self, name_prefix: impl Into<String>) -> LazyBuilder<I, L> {
+    pub fn name(mut self, name_prefix: impl Into<String>) -> LazyBuilder<T> {
         self.builder.name_prefix = name_prefix.into();
         self
     }
 }
 
-impl<I, L> LazyBuilder<I, L>
-where
-    I: TaskInjector,
-    L: LocalQueue + Send + 'static,
-{
+impl<T: TaskCell + Send + 'static> LazyBuilder<T> {
     /// Spawns all the required threads.
     ///
     /// There will be `max_thread_count` threads spawned. Generally only a few
     /// will keep running in the background, most of them are put to sleep
     /// immediately.
-    pub fn build<F>(self, mut factory: F) -> ThreadPool<I>
+    pub fn build<F>(self, mut factory: F) -> ThreadPool<T>
     where
         F: RunnerBuilder,
         F::Runner: Runner + Send + 'static,
@@ -78,7 +74,9 @@ where
             );
         }
         ThreadPool {
-            injector: self.injector,
+            remote: Remote {
+                injector: self.injector,
+            },
             threads: Mutex::new(threads),
         }
     }
@@ -176,17 +174,13 @@ impl Builder {
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
     /// to separate the construction and starting.
-    pub fn freeze<I, L>(
+    pub fn freeze<T>(
         &self,
-        queue_builder: impl FnOnce(usize) -> (I, Vec<L>),
-    ) -> (Remote<I>, LazyBuilder<I, L>)
-    where
-        I: TaskInjector,
-        L: LocalQueue<TaskCell = I::TaskCell> + Send + 'static,
-    {
+        queue_builder: impl FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
+    ) -> (Remote<T>, LazyBuilder<T>) {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
         let (injector, local_queues) = queue_builder(self.sched_config.max_thread_count);
-
+        let injector = Arc::new(injector);
         (
             Remote {
                 injector: injector.clone(),
@@ -203,14 +197,13 @@ impl Builder {
     ///
     /// `queue_builder` is a closure that creates a task queue. It accepts the
     /// number of local queues and returns the task injector and local queues.
-    pub fn build<I, L, B>(
+    pub fn build<T, B>(
         &self,
-        queue_builder: impl FnOnce(usize) -> (I, Vec<L>),
+        queue_builder: impl FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
         runner_builder: B,
-    ) -> ThreadPool<I>
+    ) -> ThreadPool<T>
     where
-        I: TaskInjector,
-        L: LocalQueue<TaskCell = I::TaskCell> + Send + 'static,
+        T: TaskCell + Send + 'static,
         B: RunnerBuilder,
         B::Runner: Runner + Send + 'static,
     {
@@ -219,17 +212,17 @@ impl Builder {
 }
 
 /// A generic thread pool.
-pub struct ThreadPool<I: TaskInjector> {
-    injector: I,
+pub struct ThreadPool<T: TaskCell + Send> {
+    remote: Remote<T>,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
-impl<I: TaskInjector> ThreadPool<I> {
+impl<T: TaskCell + Send> ThreadPool<T> {
     /// Spawns the task into the thread pool.
     ///
     /// If the pool is shutdown, it becomes no-op.
-    pub fn spawn(&self, t: impl Into<I::TaskCell>) {
-        self.injector.push(t.into());
+    pub fn spawn(&self, t: impl Into<T>) {
+        self.remote.spawn(t);
     }
 
     /// Shutdowns the pool.
@@ -243,14 +236,12 @@ impl<I: TaskInjector> ThreadPool<I> {
     }
 
     /// Get a remote queue for spawning tasks without owning the thread pool.
-    pub fn remote(&self) -> Remote<I> {
-        Remote {
-            injector: self.injector.clone(),
-        }
+    pub fn remote(&self) -> Remote<T> {
+        self.remote.clone()
     }
 }
 
-impl<I: TaskInjector> Drop for ThreadPool<I> {
+impl<T: TaskCell + Send> Drop for ThreadPool<T> {
     /// Will shutdown the thread pool if it has not.
     fn drop(&mut self) {
         self.shutdown();
@@ -259,16 +250,23 @@ impl<I: TaskInjector> Drop for ThreadPool<I> {
 
 /// A remote handle that can spawn tasks to the thread pool without owning
 /// it.
-#[derive(Clone)]
-pub struct Remote<I> {
-    injector: I,
+pub struct Remote<T> {
+    injector: Arc<TaskInjector<T>>,
 }
 
-impl<I: TaskInjector> Remote<I> {
+impl<T: TaskCell> Remote<T> {
     /// Spawns the tasks into thread pool.
     ///
     /// If the thread pool is shutdown, it becomes no-op.
-    pub fn spawn(&self, _t: impl Into<I::TaskCell>) {
+    pub fn spawn(&self, _t: impl Into<T>) {
         unimplemented!()
+    }
+}
+
+impl<T> Clone for Remote<T> {
+    fn clone(&self) -> Remote<T> {
+        Remote {
+            injector: self.injector.clone(),
+        }
     }
 }
