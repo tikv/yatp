@@ -10,18 +10,18 @@ use std::time::Instant;
 #[derive(Debug, Clone)]
 pub struct Extras {
     /// The instant when the task cell is pushed to the queue.
-    pub schedule_time: Option<Instant>,
+    pub(crate) schedule_time: Option<Instant>,
     /// The identifier of the task. Only used in the multilevel task queue.
-    pub task_id: u64,
+    pub(crate) task_id: u64,
     /// The time spent on handling this task. Only used in the multilevel task
     /// queue.
-    pub running_time: Option<Arc<ElapsedTime>>,
+    pub(crate) running_time: Option<Arc<ElapsedTime>>,
     /// The level of queue which this task comes from. Only used in the
     /// multilevel task queue.
-    pub current_level: u8,
+    pub(crate) current_level: u8,
     /// If `fixed_level` is `Some`, this task is always pushed to the given
     /// level. Only used in the multilevel task queue.
-    pub fixed_level: Option<u8>,
+    pub(crate) fixed_level: Option<u8>,
 }
 
 impl Extras {

@@ -8,8 +8,9 @@
 //! which make it possible to do extreme optimizations and define complicated
 //! data structs.
 
+pub mod multilevel;
+
 mod extras;
-mod multilevel;
 mod simple;
 
 pub use self::extras::Extras;
@@ -27,13 +28,15 @@ pub struct TaskInjector<T>(InjectorInner<T>);
 
 enum InjectorInner<T> {
     Simple(simple::QueueInjector<T>),
+    Multilevel(multilevel::QueueInjector<T>),
 }
 
 impl<T: TaskCell + Send> TaskInjector<T> {
     /// Pushes a task to the queue.
     pub fn push(&self, task_cell: T) {
-        match self.0 {
-            InjectorInner::Simple(ref s) => s.push(task_cell),
+        match &self.0 {
+            InjectorInner::Simple(q) => q.push(task_cell),
+            InjectorInner::Multilevel(q) => q.push(task_cell),
         }
     }
 }
@@ -56,21 +59,24 @@ pub struct LocalQueue<T>(LocalQueueInner<T>);
 
 enum LocalQueueInner<T> {
     Simple(simple::QueueLocal<T>),
+    Multilevel(multilevel::QueueLocal<T>),
 }
 
 impl<T: TaskCell + Send> LocalQueue<T> {
     /// Pushes a task to the local queue.
     pub fn push(&mut self, task_cell: T) {
-        match self.0 {
-            LocalQueueInner::Simple(ref mut s) => s.push(task_cell),
+        match &mut self.0 {
+            LocalQueueInner::Simple(q) => q.push(task_cell),
+            LocalQueueInner::Multilevel(q) => q.push(task_cell),
         }
     }
 
     /// Gets a task cell from the queue. Returns `None` if there is no task cell
     /// available.
     pub fn pop(&mut self) -> Option<Pop<T>> {
-        match self.0 {
-            LocalQueueInner::Simple(ref mut s) => s.pop(),
+        match &mut self.0 {
+            LocalQueueInner::Simple(q) => q.pop(),
+            LocalQueueInner::Multilevel(q) => q.pop(),
         }
     }
 }

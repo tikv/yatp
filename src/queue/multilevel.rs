@@ -3,11 +3,10 @@
 //! A multilevel feedback task queue. Long-running tasks are pushed to levels
 //! with lower priority.
 //!
-//! The task queue requires [`TaskCell`] to contain [`MultilevelQueueExtras`]
-//! as its extras. Additionally, the accompanying [`MultilevelRunner`] must be
+//! The task queue requires that the accompanying [`MultilevelRunner`] must be
 //! used to collect necessary information.
 
-use super::{Extras, LocalQueue, Pop, TaskCell, TaskInjector};
+use super::{InjectorInner, LocalQueue, LocalQueueInner, Pop, TaskCell, TaskInjector};
 use crate::runner::{LocalSpawn, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
@@ -62,7 +61,7 @@ impl<T> QueueInjector<T>
 where
     T: TaskCell + Send,
 {
-    fn push(&self, mut task_cell: T) {
+    pub(super) fn push(&self, mut task_cell: T) {
         self.manager.prepare_before_push(&mut task_cell);
         let level = task_cell.mut_extras().current_level as usize;
         self.level_injectors[level].push(task_cell);
@@ -84,12 +83,12 @@ impl<T> QueueLocal<T>
 where
     T: TaskCell,
 {
-    fn push(&mut self, mut task_cell: T) {
+    pub(super) fn push(&mut self, mut task_cell: T) {
         self.manager.prepare_before_push(&mut task_cell);
         self.local_queue.push(task_cell);
     }
 
-    fn pop(&mut self) -> Option<Pop<T>> {
+    pub(super) fn pop(&mut self) -> Option<Pop<T>> {
         fn into_pop<T>(mut t: T, from_local: bool) -> Pop<T>
         where
             T: TaskCell,
@@ -318,7 +317,7 @@ impl LevelManager {
 }
 
 #[derive(Default, Debug)]
-pub struct ElapsedTime(AtomicU64);
+pub(crate) struct ElapsedTime(AtomicU64);
 
 impl ElapsedTime {
     fn as_duration(&self) -> Duration {
@@ -474,15 +473,14 @@ impl Builder {
         }
     }
 
-    /// Creates the injector and local queues of the multilevel task queue.
-    pub fn build<T>(self, local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
+    fn build_raw<T>(self, local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
         let level_injectors: Arc<[Injector<T>; LEVEL_NUM]> =
             Arc::new(InitWith::init_with(Injector::new));
         let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)
             .take(local_num)
             .collect();
         let stealers: Vec<_> = workers.iter().map(Worker::stealer).collect();
-        let local_queues = workers
+        let locals = workers
             .into_iter()
             .enumerate()
             .map(|(self_index, local_queue)| {
@@ -507,6 +505,19 @@ impl Builder {
                 level_injectors,
                 manager: self.manager,
             },
+            locals,
+        )
+    }
+
+    /// Creates the injector and local queues of the multilevel task queue.
+    pub fn build<T>(self, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+        let (injector, locals) = self.build_raw(local_num);
+        let local_queues = locals
+            .into_iter()
+            .map(|local| LocalQueue(LocalQueueInner::Multilevel(local)))
+            .collect();
+        (
+            TaskInjector(InjectorInner::Multilevel(injector)),
             local_queues,
         )
     }
@@ -533,6 +544,7 @@ fn recent() -> Instant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::queue::Extras;
     use crate::runner::{LocalSpawn, RemoteSpawn};
 
     use std::thread;
@@ -653,7 +665,7 @@ mod tests {
             Config::default()
                 .level_time_threshold([Duration::from_millis(1), Duration::from_millis(100)]),
         );
-        let (injector, _) = builder.build(1);
+        let (injector, _) = builder.build_raw(1);
 
         // Running time is 50us. It should be pushed to level 0.
         let extras = Extras {
@@ -738,7 +750,7 @@ mod tests {
     #[test]
     fn test_pop_by_steal_others() {
         let builder = Builder::new(Config::default());
-        let (injector, mut locals) = builder.build(3);
+        let (injector, mut locals) = builder.build_raw(3);
         for i in 0..50 {
             injector.push(MockTask::new(i, Extras::multilevel_default()));
         }
@@ -787,7 +799,7 @@ mod tests {
     fn test_runner_records_handle_time() {
         let builder = Builder::new(Config::default());
         let mut runner_builder = builder.runner_builder(MockRunnerBuilder);
-        let (injector, mut locals) = builder.build(1);
+        let (injector, mut locals) = builder.build_raw(1);
         let mut runner = runner_builder.build();
         let mut spawn = MockSpawn;
 
