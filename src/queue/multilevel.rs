@@ -7,7 +7,7 @@
 //! as its extras. Additionally, the accompanying [`MultilevelRunner`] must be
 //! used to collect necessary information.
 
-use super::{LocalQueue, Pop, TaskCell, TaskInjector};
+use super::{Extras, LocalQueue, Pop, TaskCell, TaskInjector};
 use crate::runner::{LocalSpawn, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
@@ -44,12 +44,12 @@ const MAX_LEVEL0_CHANCE: u32 = 4_209_067_949; // 0.98
 const ADJUST_AMOUNT: u32 = (MAX_LEVEL0_CHANCE - MIN_LEVEL0_CHANCE) / 8; // 0.06
 
 /// The injector of a multilevel task queue.
-pub struct MultilevelQueueInjector<T> {
+pub struct QueueInjector<T> {
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
     manager: Arc<LevelManager>,
 }
 
-impl<T> Clone for MultilevelQueueInjector<T> {
+impl<T> Clone for QueueInjector<T> {
     fn clone(&self) -> Self {
         Self {
             level_injectors: self.level_injectors.clone(),
@@ -58,49 +58,11 @@ impl<T> Clone for MultilevelQueueInjector<T> {
     }
 }
 
-/// The extras for the task cells pushed into a multilevel task queue.
-#[derive(Debug, Clone)]
-pub struct MultilevelQueueExtras {
-    /// The identifier of the task.
-    task_id: u64,
-    /// The instant when the task cell is pushed to the queue.
-    schedule_time: Option<Instant>,
-    /// The time spent on handling this task.
-    running_time: Option<Arc<ElapsedTime>>,
-    /// The level of queue which this task comes from.
-    current_level: u8,
-    /// If `fixed_level` is `Some`, this task is always pushed to the given level.
-    fixed_level: Option<u8>,
-}
-
-impl Default for MultilevelQueueExtras {
-    /// Creates a default [`MultilevelQueueExtras`]. It generates a random task id
-    /// and does not specify the fixed level.
-    fn default() -> MultilevelQueueExtras {
-        MultilevelQueueExtras::new(thread_rng().next_u64(), None)
-    }
-}
-
-impl MultilevelQueueExtras {
-    /// Creates a [`MultilevelQueueExtras`] with custom parameters.
-    pub fn new(task_id: u64, fixed_level: Option<u8>) -> Self {
-        Self {
-            task_id,
-            schedule_time: None,
-            running_time: None,
-            current_level: 0,
-            fixed_level,
-        }
-    }
-}
-
-impl<T> TaskInjector for MultilevelQueueInjector<T>
+impl<T> QueueInjector<T>
 where
-    T: TaskCell<Extras = MultilevelQueueExtras>,
+    T: TaskCell + Send,
 {
-    type TaskCell = T;
-
-    fn push(&self, mut task_cell: Self::TaskCell) {
+    fn push(&self, mut task_cell: T) {
         self.manager.prepare_before_push(&mut task_cell);
         let level = task_cell.mut_extras().current_level as usize;
         self.level_injectors[level].push(task_cell);
@@ -108,7 +70,7 @@ where
 }
 
 /// The local queue of a multilevel task queue.
-pub struct MultilevelQueueLocal<T> {
+pub struct QueueLocal<T> {
     local_queue: Worker<T>,
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
     stealers: Vec<Stealer<T>>,
@@ -116,23 +78,21 @@ pub struct MultilevelQueueLocal<T> {
     rng: SmallRng,
 }
 
-impl<T> MultilevelQueueLocal<T> {}
+impl<T> QueueLocal<T> {}
 
-impl<T> LocalQueue for MultilevelQueueLocal<T>
+impl<T> QueueLocal<T>
 where
-    T: TaskCell<Extras = MultilevelQueueExtras>,
+    T: TaskCell,
 {
-    type TaskCell = T;
-
-    fn push(&mut self, mut task_cell: Self::TaskCell) {
+    fn push(&mut self, mut task_cell: T) {
         self.manager.prepare_before_push(&mut task_cell);
         self.local_queue.push(task_cell);
     }
 
-    fn pop(&mut self) -> Option<Pop<Self::TaskCell>> {
+    fn pop(&mut self) -> Option<Pop<T>> {
         fn into_pop<T>(mut t: T, from_local: bool) -> Pop<T>
         where
-            T: TaskCell<Extras = MultilevelQueueExtras>,
+            T: TaskCell,
         {
             let schedule_time = t.mut_extras().schedule_time.unwrap();
             Pop {
@@ -214,7 +174,7 @@ where
     B: RunnerBuilder<Runner = R>,
     R: Runner<Spawn = S>,
     S: LocalSpawn<TaskCell = T>,
-    T: TaskCell<Extras = MultilevelQueueExtras>,
+    T: TaskCell + Send,
 {
     type Runner = MultilevelRunner<R>;
 
@@ -239,7 +199,7 @@ impl<R, S, T> Runner for MultilevelRunner<R>
 where
     R: Runner<Spawn = S>,
     S: LocalSpawn<TaskCell = T>,
-    T: TaskCell<Extras = MultilevelQueueExtras>,
+    T: TaskCell + Send,
 {
     type Spawn = R::Spawn;
 
@@ -299,7 +259,7 @@ struct LevelManager {
 impl LevelManager {
     fn prepare_before_push<T>(&self, task_cell: &mut T)
     where
-        T: TaskCell<Extras = MultilevelQueueExtras>,
+        T: TaskCell,
     {
         let extras = task_cell.mut_extras();
         let task_id = extras.task_id;
@@ -358,7 +318,7 @@ impl LevelManager {
 }
 
 #[derive(Default, Debug)]
-struct ElapsedTime(AtomicU64);
+pub struct ElapsedTime(AtomicU64);
 
 impl ElapsedTime {
     fn as_duration(&self) -> Duration {
@@ -515,10 +475,7 @@ impl Builder {
     }
 
     /// Creates the injector and local queues of the multilevel task queue.
-    pub fn build<T>(
-        self,
-        local_num: usize,
-    ) -> (MultilevelQueueInjector<T>, Vec<MultilevelQueueLocal<T>>) {
+    pub fn build<T>(self, local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
         let level_injectors: Arc<[Injector<T>; LEVEL_NUM]> =
             Arc::new(InitWith::init_with(Injector::new));
         let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)
@@ -535,7 +492,7 @@ impl Builder {
                     .filter(|(index, _)| *index != self_index)
                     .map(|(_, stealer)| stealer.clone())
                     .collect();
-                MultilevelQueueLocal {
+                QueueLocal {
                     local_queue,
                     level_injectors: level_injectors.clone(),
                     stealers,
@@ -546,7 +503,7 @@ impl Builder {
             .collect();
 
         (
-            MultilevelQueueInjector {
+            QueueInjector {
                 level_injectors,
                 manager: self.manager,
             },
@@ -642,19 +599,17 @@ mod tests {
     #[derive(Debug)]
     struct MockTask {
         sleep_ms: u64,
-        extras: MultilevelQueueExtras,
+        extras: Extras,
     }
 
     impl MockTask {
-        fn new(sleep_ms: u64, extras: MultilevelQueueExtras) -> Self {
+        fn new(sleep_ms: u64, extras: Extras) -> Self {
             MockTask { sleep_ms, extras }
         }
     }
 
     impl TaskCell for MockTask {
-        type Extras = MultilevelQueueExtras;
-
-        fn mut_extras(&mut self) -> &mut MultilevelQueueExtras {
+        fn mut_extras(&mut self) -> &mut Extras {
             &mut self.extras
         }
     }
@@ -686,7 +641,7 @@ mod tests {
 
         let builder = Builder::new(Config::default());
         let (injector, mut locals) = builder.build(1);
-        injector.push(MockTask::new(0, Default::default()));
+        injector.push(MockTask::new(0, Extras::multilevel_default()));
         thread::sleep(SLEEP_DUR);
         let schedule_time = locals[0].pop().unwrap().schedule_time;
         assert!(schedule_time.elapsed() >= SLEEP_DUR);
@@ -701,11 +656,11 @@ mod tests {
         let (injector, _) = builder.build(1);
 
         // Running time is 50us. It should be pushed to level 0.
-        let extras = MultilevelQueueExtras {
+        let extras = Extras {
             running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_micros(
                 50,
             )))),
-            ..Default::default()
+            ..Extras::multilevel_default()
         };
         injector.push(MockTask::new(1, extras));
         assert_eq!(
@@ -718,11 +673,11 @@ mod tests {
         );
 
         // Running time is 10ms. It should be pushed to level 1.
-        let extras = MultilevelQueueExtras {
+        let extras = Extras {
             running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_millis(
                 10,
             )))),
-            ..Default::default()
+            ..Extras::multilevel_default()
         };
         injector.push(MockTask::new(2, extras));
         assert_eq!(
@@ -735,9 +690,9 @@ mod tests {
         );
 
         // Running time is 1s. It should be pushed to level 2.
-        let extras = MultilevelQueueExtras {
+        let extras = Extras {
             running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_secs(1)))),
-            ..Default::default()
+            ..Extras::multilevel_default()
         };
         injector.push(MockTask::new(3, extras));
         assert_eq!(
@@ -750,10 +705,10 @@ mod tests {
         );
 
         // Fixed level is set. It should be pushed to the set level.
-        let extras = MultilevelQueueExtras {
+        let extras = Extras {
             running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_secs(1)))),
             fixed_level: Some(1),
-            ..Default::default()
+            ..Extras::multilevel_default()
         };
         injector.push(MockTask::new(4, extras));
         assert_eq!(
@@ -771,7 +726,7 @@ mod tests {
         let builder = Builder::new(Config::default());
         let (injector, mut locals) = builder.build(3);
         for i in 0..100 {
-            injector.push(MockTask::new(i, Default::default()));
+            injector.push(MockTask::new(i, Extras::multilevel_default()));
         }
         let sum: u64 = (0..100)
             .map(|_| locals[2].pop().unwrap().task_cell.sleep_ms)
@@ -785,13 +740,13 @@ mod tests {
         let builder = Builder::new(Config::default());
         let (injector, mut locals) = builder.build(3);
         for i in 0..50 {
-            injector.push(MockTask::new(i, Default::default()));
+            injector.push(MockTask::new(i, Extras::multilevel_default()));
         }
         assert!(injector.level_injectors[0]
             .steal_batch(&locals[0].local_queue)
             .is_success());
         for i in 50..100 {
-            injector.push(MockTask::new(i, Default::default()));
+            injector.push(MockTask::new(i, Extras::multilevel_default()));
         }
         assert!(injector.level_injectors[0]
             .steal_batch(&locals[1].local_queue)
@@ -808,7 +763,7 @@ mod tests {
         let builder = Builder::new(Config::default());
         let (injector, locals) = builder.build(3);
         for i in 0..10_000 {
-            injector.push(MockTask::new(i, Default::default()));
+            injector.push(MockTask::new(i, Extras::multilevel_default()));
         }
         let sum = Arc::new(AtomicU64::new(0));
         let handles: Vec<_> = locals
@@ -836,7 +791,7 @@ mod tests {
         let mut runner = runner_builder.build();
         let mut spawn = MockSpawn;
 
-        injector.push(MockTask::new(100, MultilevelQueueExtras::new(42, None)));
+        injector.push(MockTask::new(100, Extras::new_multilevel(42, None)));
         if let Some(Pop { task_cell, .. }) = locals[0].pop() {
             assert!(runner.handle(&mut spawn, task_cell));
         }

@@ -2,6 +2,7 @@
 
 //! A [`FnOnce`] or [`FnMut`] closure.
 
+use crate::queue::Extras;
 use crate::LocalSpawn;
 
 use std::marker::PhantomData;
@@ -27,17 +28,15 @@ impl<Spawn> Task<Spawn> {
 }
 
 /// The task cell for callback tasks.
-pub struct TaskCell<Spawn, Extras> {
+pub struct TaskCell<Spawn> {
     /// The callback task.
     pub task: Task<Spawn>,
     /// Extra information about the task.
     pub extras: Extras,
 }
 
-impl<Spawn, Extras> crate::queue::TaskCell for TaskCell<Spawn, Extras> {
-    type Extras = Extras;
-
-    fn mut_extras(&mut self) -> &mut Self::Extras {
+impl<Spawn> crate::queue::TaskCell for TaskCell<Spawn> {
+    fn mut_extras(&mut self) -> &mut Extras {
         &mut self.extras
     }
 }
@@ -51,9 +50,9 @@ pub struct Handle<'a, Spawn> {
     rerun: bool,
 }
 
-impl<'a, Spawn, Extras> Handle<'a, Spawn>
+impl<'a, Spawn> Handle<'a, Spawn>
 where
-    Spawn: LocalSpawn<TaskCell = TaskCell<Spawn, Extras>>,
+    Spawn: LocalSpawn<TaskCell = TaskCell<Spawn>>,
 {
     /// Spawns a [`FnOnce`] to the thread pool.
     pub fn spawn_once(
@@ -119,13 +118,22 @@ impl<Spawn> Default for Runner<Spawn> {
     }
 }
 
-impl<Spawn, Extras> crate::Runner for Runner<Spawn>
+impl<Spawn> Clone for Runner<Spawn> {
+    fn clone(&self) -> Runner<Spawn> {
+        Runner {
+            max_inplace_spin: self.max_inplace_spin,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<Spawn> crate::Runner for Runner<Spawn>
 where
-    Spawn: LocalSpawn<TaskCell = TaskCell<Spawn, Extras>>,
+    Spawn: LocalSpawn<TaskCell = TaskCell<Spawn>>,
 {
     type Spawn = Spawn;
 
-    fn handle(&mut self, spawn: &mut Spawn, mut task_cell: TaskCell<Spawn, Extras>) -> bool {
+    fn handle(&mut self, spawn: &mut Spawn, mut task_cell: TaskCell<Spawn>) -> bool {
         let mut handle = Handle {
             spawn,
             rerun: false,
@@ -168,10 +176,10 @@ mod tests {
     }
 
     impl LocalSpawn for MockSpawn {
-        type TaskCell = TaskCell<MockSpawn, ()>;
+        type TaskCell = TaskCell<MockSpawn>;
         type Remote = MockSpawn;
 
-        fn spawn(&mut self, _t: TaskCell<MockSpawn, ()>) {
+        fn spawn(&mut self, _t: TaskCell<MockSpawn>) {
             self.spawn_times += 1;
         }
 
@@ -181,9 +189,9 @@ mod tests {
     }
 
     impl RemoteSpawn for MockSpawn {
-        type TaskCell = TaskCell<MockSpawn, ()>;
+        type TaskCell = TaskCell<MockSpawn>;
 
-        fn spawn(&self, _task: TaskCell<MockSpawn, ()>) {
+        fn spawn(&self, _task: TaskCell<MockSpawn>) {
             unimplemented!()
         }
     }
@@ -199,7 +207,7 @@ mod tests {
                 task: Task::new_once(move |_| {
                     tx.send(42).unwrap();
                 }),
-                extras: (),
+                extras: Extras::simple_default(),
             },
         );
         assert_eq!(rx.recv().unwrap(), 42);
@@ -222,7 +230,7 @@ mod tests {
                         handle.set_rerun(true);
                     }
                 }),
-                extras: (),
+                extras: Extras::simple_default(),
             },
         );
         assert_eq!(rx.recv().unwrap(), 42);
@@ -248,7 +256,7 @@ mod tests {
                         handle.set_rerun(true);
                     }
                 }),
-                extras: (),
+                extras: Extras::simple_default(),
             },
         );
         assert_eq!(rx.recv().unwrap(), 42);
