@@ -2,40 +2,38 @@
 
 //! A [`FnOnce`] or [`FnMut`] closure.
 
-use crate::LocalSpawn;
 use crate::queue::Extras;
-
-use std::marker::PhantomData;
+use crate::pool::Local;
 
 /// A callback task, which is either a [`FnOnce`] or a [`FnMut`].
-pub enum Task<Spawn> {
+pub enum Task {
     /// A [`FnOnce`] task.
-    Once(Box<dyn FnOnce(&mut Handle<'_, Spawn>) + Send>),
+    Once(Box<dyn FnOnce(&mut Handle<'_>) + Send>),
     /// A [`FnMut`] task.
-    Mut(Box<dyn FnMut(&mut Handle<'_, Spawn>) + Send>),
+    Mut(Box<dyn FnMut(&mut Handle<'_>) + Send>),
 }
 
-impl<Spawn> Task<Spawn> {
+impl Task {
     /// Creates a [`FnOnce`] task.
-    pub fn new_once(t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static) -> Self {
+    pub fn new_once(t: impl FnOnce(&mut Handle<'_>) + Send + 'static) -> Self {
         Task::Once(Box::new(t))
     }
 
     /// Creates a [`FnMut`] task.
-    pub fn new_mut(t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static) -> Self {
+    pub fn new_mut(t: impl FnMut(&mut Handle<'_>) + Send + 'static) -> Self {
         Task::Mut(Box::new(t))
     }
 }
 
 /// The task cell for callback tasks.
-pub struct TaskCell<Spawn> {
+pub struct TaskCell {
     /// The callback task.
-    pub task: Task<Spawn>,
+    pub task: Task,
     /// Extra information about the task.
     pub extras: Extras,
 }
 
-impl<Spawn> crate::queue::TaskCell for TaskCell<Spawn> {
+impl crate::queue::TaskCell for TaskCell {
     fn mut_extras(&mut self) -> &mut Extras {
         &mut self.extras
     }
@@ -45,19 +43,16 @@ impl<Spawn> crate::queue::TaskCell for TaskCell<Spawn> {
 ///
 /// It can be used to spawn new tasks or control whether this task should be
 /// rerun.
-pub struct Handle<'a, Spawn> {
-    spawn: &'a mut Spawn,
+pub struct Handle<'a> {
+    spawn: &'a mut Local<TaskCell>,
     rerun: bool,
 }
 
-impl<'a, Spawn> Handle<'a, Spawn>
-where
-    Spawn: LocalSpawn<TaskCell = TaskCell<Spawn>>,
-{
+impl<'a> Handle<'a> {
     /// Spawns a [`FnOnce`] to the thread pool.
     pub fn spawn_once(
         &mut self,
-        t: impl FnOnce(&mut Handle<'_, Spawn>) + Send + 'static,
+        t: impl FnOnce(&mut Handle<'_>) + Send + 'static,
         extras: Extras,
     ) {
         self.spawn.spawn(TaskCell {
@@ -69,7 +64,7 @@ where
     /// Spawns a [`FnMut`] to the thread pool.
     pub fn spawn_mut(
         &mut self,
-        t: impl FnMut(&mut Handle<'_, Spawn>) + Send + 'static,
+        t: impl FnMut(&mut Handle<'_>) + Send + 'static,
         extras: Extras,
     ) {
         self.spawn.spawn(TaskCell {
@@ -89,12 +84,11 @@ where
 /// It's possible that a task can't be finished in a single execution and needs
 /// to be rerun. `max_inspace_spin` is the maximum times a task is rerun at once
 /// before being put back to the thread pool.
-pub struct Runner<Spawn> {
+pub struct Runner {
     max_inplace_spin: usize,
-    _phantom: PhantomData<Spawn>,
 }
 
-impl<Spawn> Runner<Spawn> {
+impl Runner {
     /// Creates a new runner with given `max_inplace_spin`.
     pub fn new(max_inplace_spin: usize) -> Self {
         Self {
@@ -109,31 +103,26 @@ impl<Spawn> Runner<Spawn> {
     }
 }
 
-impl<Spawn> Default for Runner<Spawn> {
+impl Default for Runner {
     fn default() -> Self {
         Runner {
             max_inplace_spin: 3,
-            _phantom: PhantomData,
         }
     }
 }
 
-impl<Spawn> Clone for Runner<Spawn> {
-    fn clone(&self) -> Runner<Spawn> {
+impl Clone for Runner {
+    fn clone(&self) -> Runner {
         Runner {
             max_inplace_spin: self.max_inplace_spin,
-            _phantom: PhantomData,
         }
     }
 }
 
-impl<Spawn> crate::Runner for Runner<Spawn>
-where
-    Spawn: LocalSpawn<TaskCell = TaskCell<Spawn>>,
-{
-    type Spawn = Spawn;
+impl crate::Runner for Runner {
+    type TaskCell = TaskCell;
 
-    fn handle(&mut self, spawn: &mut Spawn, mut task_cell: TaskCell<Spawn>) -> bool {
+    fn handle(&mut self, spawn: &mut Local<TaskCell>, mut task_cell: TaskCell) -> bool {
         let mut handle = Handle {
             spawn,
             rerun: false,
@@ -166,7 +155,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RemoteSpawn, Runner as _};
+    use crate::Runner as _;
 
     use std::sync::mpsc;
 
@@ -175,23 +164,12 @@ mod tests {
         spawn_times: usize,
     }
 
-    impl LocalSpawn for MockSpawn {
-        type TaskCell = TaskCell<MockSpawn>;
-        type Remote = MockSpawn;
-
-        fn spawn(&mut self, _t: TaskCell<MockSpawn>) {
+    impl MockSpawn {
+        fn spawn(&mut self, _t: TaskCell) {
             self.spawn_times += 1;
         }
 
         fn remote(&self) -> Self::Remote {
-            unimplemented!()
-        }
-    }
-
-    impl RemoteSpawn for MockSpawn {
-        type TaskCell = TaskCell<MockSpawn>;
-
-        fn spawn(&self, _task: TaskCell<MockSpawn>) {
             unimplemented!()
         }
     }

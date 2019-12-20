@@ -2,9 +2,11 @@
 
 pub mod builder;
 pub mod worker;
+mod spawn;
 
-use crate::pool::worker::Remote;
-use crate::queue::{TaskInjector, TaskCell};
+pub use self::spawn::{Remote, Local};
+
+use crate::queue::TaskCell;
 use std::mem;
 use std::sync::Mutex;
 use std::thread::JoinHandle;

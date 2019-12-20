@@ -1,7 +1,8 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::pool::worker::{Local, QueueCore, WorkerThread};
-use crate::pool::{Remote, SchedConfig, ThreadPool};
+use crate::pool::worker::WorkerThread;
+use crate::pool::spawn::QueueCore;
+use crate::pool::{Remote, Local, SchedConfig, ThreadPool};
 use crate::queue::{LocalQueue, TaskInjector, TaskCell};
 use crate::runner::{Runner, RunnerBuilder};
 use std::sync::{Arc, Mutex};
@@ -36,7 +37,7 @@ where
     pub fn build<F>(self, mut factory: F) -> ThreadPool<T>
     where
         F: RunnerBuilder,
-        F::Runner: Runner<Spawn = Local<T>> + Send + 'static,
+        F::Runner: Runner<TaskCell = T> + Send + 'static,
     {
         let mut threads = Vec::with_capacity(self.builder.sched_config.max_thread_count);
         for (i, local_queue) in self.local_queues.into_iter().enumerate() {
@@ -46,7 +47,8 @@ where
             if let Some(size) = self.builder.stack_size {
                 builder = builder.stack_size(size)
             }
-            let thd = WorkerThread::new(i + 1, local_queue, self.core.clone(), runner);
+            let local = Local::new(i + 1, local_queue, self.core.clone());
+            let thd = WorkerThread::new(local, runner);
             threads.push(
                 builder
                     .spawn(move || {
@@ -187,7 +189,7 @@ impl Builder {
     where
         T: TaskCell + Send + 'static,
         B: RunnerBuilder,
-        B::Runner: Runner<Spawn = Local<T>> + Send + 'static,
+        B::Runner: Runner<TaskCell = T> + Send + 'static,
     {
         self.freeze(queue_builder).1.build(runner_builder)
     }

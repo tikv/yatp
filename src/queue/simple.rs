@@ -2,12 +2,10 @@
 
 //! A simple task queue.
 //!
-//! This task queue requires [`TaskCell`] to contain [`SimpleQueueExtras`]
-//! as its extras. The instant when the task cell is pushed into the queue
-//! is recorded in the extras.
+//! The instant when the task cell is pushed into the queue is recorded
+//! in the extras.
 
-use super::{LocalQueue, Pop, TaskCell, TaskInjector};
-use crate::queue::Extras;
+use super::{Pop, TaskCell};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use rand::prelude::*;
@@ -142,6 +140,7 @@ pub fn create<T>(local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
 mod tests {
     use super::*;
 
+    use crate::queue::Extras;
     use std::sync::atomic::{AtomicI32, Ordering};
     use std::thread;
     use std::time::Duration;
