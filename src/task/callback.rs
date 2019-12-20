@@ -2,8 +2,8 @@
 
 //! A [`FnOnce`] or [`FnMut`] closure.
 
+use crate::pool::LocalSpawn;
 use crate::queue::Extras;
-use crate::LocalSpawn;
 
 use std::marker::PhantomData;
 
@@ -127,7 +127,7 @@ impl<Spawn> Clone for Runner<Spawn> {
     }
 }
 
-impl<Spawn> crate::Runner for Runner<Spawn>
+impl<Spawn> crate::pool::Runner for Runner<Spawn>
 where
     Spawn: LocalSpawn<TaskCell = TaskCell<Spawn>>,
 {
@@ -166,7 +166,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RemoteSpawn, Runner as _};
+    use crate::pool::{RemoteSpawn, Runner as _};
 
     use std::sync::mpsc;
 
