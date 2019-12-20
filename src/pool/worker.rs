@@ -26,7 +26,7 @@ where
                 Some(t) => t,
                 None => {
                     self.runner.pause(&mut self.local);
-                    match self.local.sleep() {
+                    match self.local.pop_or_sleep() {
                         Some(t) => {
                             self.runner.resume(&mut self.local);
                             t

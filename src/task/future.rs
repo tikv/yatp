@@ -29,9 +29,6 @@ pub struct Task {
 /// A [`Future`] task cell.
 pub struct TaskCell(Arc<Task>);
 
-trait AssertSend: Send {}
-impl AssertSend for Task {}
-
 // Safety: It is ensured that `future` and `extras` are always accessed by
 // only one thread at the same time.
 unsafe impl Sync for Task {}
