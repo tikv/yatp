@@ -2,8 +2,8 @@
 
 //! A [`Future`].
 
+use crate::pool::{Local, Remote};
 use crate::queue::Extras;
-use crate::pool::{Remote, Local};
 
 use std::cell::UnsafeCell;
 use std::future::Future;
@@ -81,12 +81,7 @@ impl crate::queue::TaskCell for TaskCell {
 unsafe fn waker(task: *const Task) -> Waker {
     Waker::from_raw(RawWaker::new(
         task as *const (),
-        &RawWakerVTable::new(
-            clone_raw,
-            wake_raw,
-            wake_ref_raw,
-            drop_raw,
-        ),
+        &RawWakerVTable::new(clone_raw, wake_raw, wake_ref_raw, drop_raw),
     ))
 }
 
@@ -95,12 +90,7 @@ unsafe fn clone_raw(this: *const ()) -> RawWaker {
     let task_cell = clone_task(this as *const Task);
     RawWaker::new(
         Arc::into_raw(task_cell.0) as *const (),
-        &RawWakerVTable::new(
-            clone_raw,
-            wake_raw,
-            wake_ref_raw,
-            drop_raw,
-        ),
+        &RawWakerVTable::new(clone_raw, wake_raw, wake_ref_raw, drop_raw),
     )
 }
 
@@ -158,9 +148,7 @@ unsafe fn task_cell(task: *const Task) -> TaskCell {
 }
 
 #[inline]
-unsafe fn clone_task(
-    task: *const Task,
-) -> TaskCell {
+unsafe fn clone_task(task: *const Task) -> TaskCell {
     let task_cell = task_cell(task);
     mem::forget(task_cell.0.clone());
     task_cell
@@ -185,9 +173,7 @@ impl Runner {
     /// `repoll_limit` is the maximum times a [`Future`] is polled again
     /// immediately after polling because of being waken up during polling.
     pub fn new(repoll_limit: usize) -> Self {
-        Self {
-            repoll_limit,
-        }
+        Self { repoll_limit }
     }
 }
 
@@ -226,8 +212,8 @@ impl crate::pool::Runner for Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::{build_spawn, Runner as _};
     use crate::queue;
-    use crate::pool::{Runner as _, build_spawn};
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -303,7 +289,9 @@ mod tests {
             WakeLater::new(waker_tx.clone()).await;
             res_tx.send(2).unwrap();
         };
-        local.remote.spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
+        local
+            .remote
+            .spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -364,7 +352,9 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(2).unwrap();
         };
-        local.remote.spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
+        local
+            .remote
+            .spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -385,7 +375,9 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(4).unwrap();
         };
-        local.remote.spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
+        local
+            .remote
+            .spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);

@@ -8,8 +8,8 @@
 //! which make it possible to do extreme optimizations and define complicated
 //! data structs.
 
-mod simple;
 mod extras;
+mod simple;
 
 pub use self::extras::Extras;
 
@@ -77,5 +77,11 @@ impl<T: TaskCell + Send> LocalQueue<T> {
 /// Creates a task queue that allows given number consumers.
 pub fn simple<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
     let (injector, locals) = simple::create(local_num);
-    (TaskInjector(InjectorInner::Simple(injector)), locals.into_iter().map(|i| LocalQueue(LocalQueueInner::Simple(i))).collect())
+    (
+        TaskInjector(InjectorInner::Simple(injector)),
+        locals
+            .into_iter()
+            .map(|i| LocalQueue(LocalQueueInner::Simple(i)))
+            .collect(),
+    )
 }

@@ -1,12 +1,12 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::queue::TaskCell;
-use crate::queue::{TaskInjector, LocalQueue, Pop};
 use crate::pool::SchedConfig;
+use crate::queue::TaskCell;
+use crate::queue::{LocalQueue, Pop, TaskInjector};
+use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use parking_lot_core::{UnparkToken, ParkToken, ParkResult};
 
 const SHUTDOWN_BIT: usize = 1;
 const WORKER_COUNT_SHIFT: usize = 1;
@@ -33,9 +33,7 @@ impl<T> QueueCore<T> {
 
     pub fn ensure_workers(&self, source: usize) {
         let cnt = self.active_workers.load(Ordering::Relaxed);
-        if (cnt >> WORKER_COUNT_SHIFT) >= self.config.max_thread_count
-            || is_shutdown(cnt)
-        {
+        if (cnt >> WORKER_COUNT_SHIFT) >= self.config.max_thread_count || is_shutdown(cnt) {
             return;
         }
 
@@ -101,7 +99,7 @@ impl<T: TaskCell + Send> QueueCore<T> {
 }
 
 /// Submits tasks to associated thread pool.
-/// 
+///
 /// Note that thread pool can be shutdown and dropped even not all remotes are
 /// dropped.
 pub struct Remote<T> {
@@ -135,7 +133,7 @@ trait AssertSync: Sync {}
 impl<T: Send> AssertSync for Remote<T> {}
 
 /// Spawns tasks to the associated thread pool.
-/// 
+///
 /// It's different from `Remote` because it submits tasks to the local queue
 /// instead of global queue, so new tasks can take advantage of cache
 /// coherence.
@@ -205,7 +203,7 @@ impl<T: TaskCell + Send> Local<T> {
                 ParkResult::Unparked(_) | ParkResult::Invalid => {
                     self.core.wake();
                     task
-                },
+                }
                 ParkResult::TimedOut => {
                     timeout = None;
                     continue;
@@ -216,19 +214,22 @@ impl<T: TaskCell + Send> Local<T> {
 }
 
 /// Building remotes and locals from the given queue and configuration.
-/// 
+///
 /// This is only for tests purpose so that a thread pool doesn't have to be
 /// spawned to test a Runner.
 #[doc(hidden)]
 pub fn build_spawn<F, T>(f: F, config: SchedConfig) -> (Remote<T>, Vec<Local<T>>)
-where F: FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
-T: TaskCell + Send
+where
+    F: FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
+    T: TaskCell + Send,
 {
     let (global, locals) = f(config.max_thread_count);
     let core = Arc::new(QueueCore::new(global, config));
-    let l = locals.into_iter().enumerate().map(|(i, l)| {
-        Local::new(i + 1, l, core.clone())
-    }).collect();
+    let l = locals
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| Local::new(i + 1, l, core.clone()))
+        .collect();
     let g = Remote::new(core);
     (g, l)
 }

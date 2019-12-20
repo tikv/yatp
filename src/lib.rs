@@ -8,4 +8,4 @@ pub mod pool;
 pub mod queue;
 pub mod task;
 
-pub use self::pool::{Remote, ThreadPool, Builder};
+pub use self::pool::{Builder, Remote, ThreadPool};

@@ -5,14 +5,14 @@
 //! To build your own runners, you need to implement
 
 mod builder;
-mod worker;
-mod spawn;
 mod runner;
+mod spawn;
+mod worker;
 
-pub use self::spawn::{Remote, Local, build_spawn};
-pub use self::builder::SchedConfig;
-pub use self::runner::{Runner, CloneRunnerBuilder, RunnerBuilder};
 pub use self::builder::Builder;
+pub use self::builder::SchedConfig;
+pub use self::runner::{CloneRunnerBuilder, Runner, RunnerBuilder};
+pub use self::spawn::{build_spawn, Local, Remote};
 
 use crate::queue::TaskCell;
 use std::mem;

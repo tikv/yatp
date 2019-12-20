@@ -2,8 +2,8 @@
 
 //! A [`FnOnce`] or [`FnMut`] closure.
 
-use crate::queue::Extras;
 use crate::pool::Local;
+use crate::queue::Extras;
 
 /// A callback task, which is either a [`FnOnce`] or a [`FnMut`].
 pub enum Task {
@@ -40,7 +40,8 @@ impl crate::queue::TaskCell for TaskCell {
 }
 
 impl<F> From<F> for TaskCell
-where F: FnOnce(&mut Handle<'_>) + Send + 'static
+where
+    F: FnOnce(&mut Handle<'_>) + Send + 'static,
 {
     fn from(f: F) -> TaskCell {
         TaskCell {
@@ -61,11 +62,7 @@ pub struct Handle<'a> {
 
 impl<'a> Handle<'a> {
     /// Spawns a [`FnOnce`] to the thread pool.
-    pub fn spawn_once(
-        &mut self,
-        t: impl FnOnce(&mut Handle<'_>) + Send + 'static,
-        extras: Extras,
-    ) {
+    pub fn spawn_once(&mut self, t: impl FnOnce(&mut Handle<'_>) + Send + 'static, extras: Extras) {
         self.spawn.spawn(TaskCell {
             task: Task::new_once(t),
             extras,
@@ -73,11 +70,7 @@ impl<'a> Handle<'a> {
     }
 
     /// Spawns a [`FnMut`] to the thread pool.
-    pub fn spawn_mut(
-        &mut self,
-        t: impl FnMut(&mut Handle<'_>) + Send + 'static,
-        extras: Extras,
-    ) {
+    pub fn spawn_mut(&mut self, t: impl FnMut(&mut Handle<'_>) + Send + 'static, extras: Extras) {
         self.spawn.spawn(TaskCell {
             task: Task::new_mut(t),
             extras,
@@ -102,10 +95,7 @@ pub struct Runner {
 impl Runner {
     /// Creates a new runner with given `max_inplace_spin`.
     pub fn new(max_inplace_spin: usize) -> Self {
-        Self {
-            max_inplace_spin,
-            ..Default::default()
-        }
+        Self { max_inplace_spin }
     }
 
     /// Sets `max_inplace_spin`.
@@ -166,8 +156,8 @@ impl crate::pool::Runner for Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::{build_spawn, Runner as _};
     use crate::queue;
-    use crate::pool::{Runner as _, build_spawn};
     use std::sync::mpsc;
 
     #[test]

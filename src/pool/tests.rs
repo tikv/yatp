@@ -1,11 +1,11 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::pool::*;
-use crate::task::callback::{Runner, Handle};
 use crate::queue;
+use crate::task::callback::{Handle, Runner};
 use std::sync::mpsc;
-use std::time::*;
 use std::thread;
+use std::time::*;
 
 #[test]
 fn test_basic() {
@@ -59,7 +59,7 @@ fn test_basic() {
     for _ in 0..5 {
         let _ = rx.try_recv();
     }
-    
+
     // Shutdown should stop processing tasks.
     pool.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap());
     let res = rx.recv_timeout(Duration::from_millis(10));

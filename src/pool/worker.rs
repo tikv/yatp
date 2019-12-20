@@ -9,22 +9,16 @@ pub(crate) struct WorkerThread<T, R> {
 }
 
 impl<T, R> WorkerThread<T, R> {
-    pub fn new(
-        local: Local<T>,
-        runner: R,
-    ) -> WorkerThread<T, R> {
-        WorkerThread {
-            local,
-            runner,
-        }
+    pub fn new(local: Local<T>, runner: R) -> WorkerThread<T, R> {
+        WorkerThread { local, runner }
     }
 }
 
 impl<T, R> WorkerThread<T, R>
-    where
-        T: TaskCell + Send,
-        R: Runner<TaskCell=T>,
-    {
+where
+    T: TaskCell + Send,
+    R: Runner<TaskCell = T>,
+{
     pub fn run(mut self) {
         self.runner.start(&mut self.local);
         while !self.local.core().is_shutdown() {

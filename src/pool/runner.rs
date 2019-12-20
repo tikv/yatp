@@ -35,11 +35,7 @@ pub trait Runner {
     /// It's possible that a task can't be finished in a single execution, in
     /// which case feel free to spawn the task again and return false to
     /// indicate the task has not been finished yet.
-    fn handle(
-        &mut self,
-        spawn: &mut Local<Self::TaskCell>,
-        task_cell: Self::TaskCell,
-    ) -> bool;
+    fn handle(&mut self, spawn: &mut Local<Self::TaskCell>, task_cell: Self::TaskCell) -> bool;
 
     /// Called when the runner is put to sleep.
     fn pause(&mut self, _spawn: &mut Local<Self::TaskCell>) -> bool {

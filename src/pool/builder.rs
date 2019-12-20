@@ -1,9 +1,9 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::pool::worker::WorkerThread;
 use crate::pool::spawn::QueueCore;
-use crate::pool::{Remote, Local, ThreadPool, Runner, RunnerBuilder};
-use crate::queue::{LocalQueue, TaskInjector, TaskCell};
+use crate::pool::worker::WorkerThread;
+use crate::pool::{Local, Remote, Runner, RunnerBuilder, ThreadPool};
+use crate::queue::{LocalQueue, TaskCell, TaskInjector};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
