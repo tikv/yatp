@@ -1,5 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::pool::spawn::LocalSpawn;
+
 /// In the model of yatp, any piece of logic aiming to be executed in a thread
 /// pool is called Task. There can be different definitions of Task. Some people
 /// may choose `Future` as Task, some may just want callbacks, or even Actor
@@ -53,29 +55,6 @@ pub trait Runner {
     fn end(&mut self, _spawn: &mut Self::Spawn) {}
 }
 
-/// Allows spawning a task to the thread pool from a different thread.
-pub trait RemoteSpawn: Sync + Send {
-    /// The task it can spawn.
-    type TaskCell;
-
-    /// Spawns a task into the thread pool.
-    fn spawn(&self, task_cell: Self::TaskCell);
-}
-
-/// Allows spawning a task inside the thread pool.
-pub trait LocalSpawn {
-    /// The task it can spawn.
-    type TaskCell;
-    /// The remote handle that can be used in other threads.
-    type Remote: RemoteSpawn<TaskCell = Self::TaskCell>;
-
-    /// Spawns a task into the thread pool.
-    fn spawn(&mut self, task: Self::TaskCell);
-
-    /// Gets a remote instance to allow spawn task back to the pool.
-    fn remote(&self) -> Self::Remote;
-}
-
 /// A builder trait that produce `Runner`.
 pub trait RunnerBuilder {
     /// The runner it can build.
@@ -83,4 +62,15 @@ pub trait RunnerBuilder {
 
     /// Builds a runner.
     fn build(&mut self) -> Self::Runner;
+}
+
+/// A builder that create new Runner by cloning the old one.
+pub struct CloneRunnerBuilder<R>(pub R);
+
+impl<R: Runner + Clone> RunnerBuilder for CloneRunnerBuilder<R> {
+    type Runner = R;
+
+    fn build(&mut self) -> R {
+        self.0.clone()
+    }
 }
