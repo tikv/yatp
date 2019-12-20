@@ -1,8 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::pool::*;
-use crate::pool::builder::*;
-use crate::runner::*;
 use crate::task::callback::{Runner, Handle};
 use crate::queue;
 use std::sync::mpsc;
@@ -19,13 +17,13 @@ fn test_basic() {
 
     // Task should be executed immediately.
     let t = tx.clone();
-    pool.spawn(move |_: &mut Handle<_>| t.send(1).unwrap());
+    pool.spawn(move |_: &mut Handle<'_>| t.send(1).unwrap());
     assert_eq!(Ok(1), rx.recv_timeout(Duration::from_millis(10)));
 
     // Tasks should be executed concurrently.
     for id in 0..4 {
         let t = tx.clone();
-        pool.spawn(move |_: &mut Handle<_>| {
+        pool.spawn(move |_: &mut Handle<'_>| {
             thread::sleep(Duration::from_millis(100));
             t.send(id).unwrap();
         })
@@ -40,7 +38,7 @@ fn test_basic() {
     // A bunch of tasks should be executed correctly.
     for id in 10..1000 {
         let t = tx.clone();
-        pool.spawn(move |_: &mut Handle<_>| t.send(id).unwrap());
+        pool.spawn(move |_: &mut Handle<'_>| t.send(id).unwrap());
     }
     for _ in 10..1000 {
         let r = rx.recv_timeout(Duration::from_millis(10)).unwrap();
@@ -50,7 +48,7 @@ fn test_basic() {
     // Shutdown should only wait for at most one tasks.
     for _ in 0..5 {
         let t = tx.clone();
-        pool.spawn(move |_: &mut Handle<_>| {
+        pool.spawn(move |_: &mut Handle<'_>| {
             thread::sleep(Duration::from_millis(40));
             t.send(0).unwrap();
         });
@@ -63,7 +61,7 @@ fn test_basic() {
     }
     
     // Shutdown should stop processing tasks.
-    pool.spawn(move |_: &mut Handle<_>| tx.send(2).unwrap());
+    pool.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap());
     let res = rx.recv_timeout(Duration::from_millis(10));
     assert_eq!(res, Err(mpsc::RecvTimeoutError::Timeout));
 }
@@ -79,12 +77,12 @@ fn test_remote() {
     let remote = pool.remote();
     let (tx, rx) = mpsc::channel();
     let t = tx.clone();
-    remote.spawn(move |_: &mut Handle<_>| t.send(1).unwrap());
+    remote.spawn(move |_: &mut Handle<'_>| t.send(1).unwrap());
     assert_eq!(Ok(1), rx.recv_timeout(Duration::from_millis(10)));
 
     // Shutdown should stop processing tasks.
     pool.shutdown();
-    remote.spawn(move |_: &mut Handle<_>| tx.send(2).unwrap());
+    remote.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap());
     let res = rx.recv_timeout(Duration::from_millis(10));
     assert_eq!(res, Err(mpsc::RecvTimeoutError::Timeout));
 }

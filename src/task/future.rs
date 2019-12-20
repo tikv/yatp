@@ -7,7 +7,6 @@ use crate::pool::{Remote, Local};
 
 use std::cell::UnsafeCell;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
@@ -192,7 +191,7 @@ impl Runner {
     }
 }
 
-impl crate::Runner for Runner {
+impl crate::pool::Runner for Runner {
     type TaskCell = TaskCell;
 
     fn handle(&mut self, _local: &mut Local<TaskCell>, task_cell: TaskCell) -> bool {
@@ -227,7 +226,8 @@ impl crate::Runner for Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Runner as _;
+    use crate::queue;
+    use crate::pool::{Runner as _, build_spawn};
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -235,25 +235,25 @@ mod tests {
 
     struct MockLocal {
         runner: Rc<RefCell<Runner>>,
-        task_rx: mpsc::Receiver<TaskCell>,
-        remote: MockRemote,
+        remote: Remote<TaskCell>,
+        locals: Vec<Local<TaskCell>>,
     }
 
     impl MockLocal {
         fn new(runner: Runner) -> MockLocal {
-            let (task_tx, task_rx) = mpsc::sync_channel(10);
+            let (remote, locals) = build_spawn(queue::simple, Default::default());
             MockLocal {
                 runner: Rc::new(RefCell::new(runner)),
-                task_rx,
-                remote: MockRemote { task_tx },
+                remote,
+                locals,
             }
         }
 
         /// Run `Runner::handle` once.
         fn handle_once(&mut self) {
-            if let Ok(task_cell) = self.task_rx.try_recv() {
+            if let Some(t) = self.locals[0].pop() {
                 let runner = self.runner.clone();
-                runner.borrow_mut().handle(self, task_cell);
+                runner.borrow_mut().handle(&mut self.locals[0], t.task_cell);
             }
         }
     }
@@ -261,23 +261,6 @@ mod tests {
     impl Default for MockLocal {
         fn default() -> Self {
             MockLocal::new(Default::default())
-        }
-    }
-
-    #[derive(Clone)]
-    struct MockRemote {
-        task_tx: mpsc::SyncSender<TaskCell>,
-    }
-
-    impl MockLocal {
-        fn spawn(&mut self, task_cell: TaskCell) {
-            self.remote.task_tx.send(task_cell).unwrap();
-        }
-    }
-
-    impl MockRemote {
-        fn spawn(&self, task_cell: TaskCell) {
-            self.task_tx.send(task_cell).unwrap();
         }
     }
 
@@ -320,7 +303,7 @@ mod tests {
             WakeLater::new(waker_tx.clone()).await;
             res_tx.send(2).unwrap();
         };
-        local.spawn(TaskCell::new(fut, local.remote(), Default::default()));
+        local.remote.spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -381,7 +364,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(2).unwrap();
         };
-        local.spawn(TaskCell::new(fut, local.remote(), Default::default()));
+        local.remote.spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -402,7 +385,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(4).unwrap();
         };
-        local.spawn(TaskCell::new(fut, local.remote(), Default::default()));
+        local.remote.spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);

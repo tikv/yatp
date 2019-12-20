@@ -100,6 +100,10 @@ impl<T: TaskCell + Send> QueueCore<T> {
     }
 }
 
+/// Submits tasks to associated thread pool.
+/// 
+/// Note that thread pool can be shutdown and dropped even not all remotes are
+/// dropped.
 pub struct Remote<T> {
     core: Arc<QueueCore<T>>,
 }
@@ -109,6 +113,7 @@ impl<T: TaskCell + Send> Remote<T> {
         Remote { core }
     }
 
+    /// Submits a task to the thread pool.
     pub fn spawn(&self, task: impl Into<T>) {
         self.core.push(0, task.into());
     }
@@ -129,6 +134,11 @@ impl<T> Clone for Remote<T> {
 trait AssertSync: Sync {}
 impl<T: Send> AssertSync for Remote<T> {}
 
+/// Spawns tasks to the associated thread pool.
+/// 
+/// It's different from `Remote` because it submits tasks to the local queue
+/// instead of global queue, so new tasks can take advantage of cache
+/// coherence.
 pub struct Local<T> {
     id: usize,
     local_queue: LocalQueue<T>,
@@ -144,14 +154,17 @@ impl<T: TaskCell + Send> Local<T> {
         }
     }
 
+    /// Spawns a task to the local queue.
     pub fn spawn(&mut self, task: T) {
         self.local_queue.push(task);
     }
 
+    /// Spawns a task to the remote queue.
     pub fn spawn_remote(&self, task: T) {
         self.core.push(self.id, task);
     }
 
+    /// Gets a remote so that tasks can be spawned from other threads.
     pub fn remote(&self) -> Remote<T> {
         Remote {
             core: self.core.clone(),
@@ -200,4 +213,22 @@ impl<T: TaskCell + Send> Local<T> {
             };
         }
     }
+}
+
+/// Building remotes and locals from the given queue and configuration.
+/// 
+/// This is only for tests purpose so that a thread pool doesn't have to be
+/// spawned to test a Runner.
+#[doc(hidden)]
+pub fn build_spawn<F, T>(f: F, config: SchedConfig) -> (Remote<T>, Vec<Local<T>>)
+where F: FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
+T: TaskCell + Send
+{
+    let (global, locals) = f(config.max_thread_count);
+    let core = Arc::new(QueueCore::new(global, config));
+    let l = locals.into_iter().enumerate().map(|(i, l)| {
+        Local::new(i + 1, l, core.clone())
+    }).collect();
+    let g = Remote::new(core);
+    (g, l)
 }

@@ -1,10 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::pool::Local;
-use crate::queue::{LocalQueue, TaskCell};
-use crate::pool::spawn::QueueCore;
-use crate::runner::Runner;
-use std::sync::Arc;
+use crate::pool::{Local, Runner};
+use crate::queue::TaskCell;
 
 pub(crate) struct WorkerThread<T, R> {
     local: Local<T>,

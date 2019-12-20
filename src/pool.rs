@@ -1,38 +1,23 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-pub mod builder;
-pub mod worker;
-mod spawn;
+//! The pool implement details.
+//!
+//! To build your own runners, you need to implement
 
-pub use self::spawn::{Remote, Local};
+mod builder;
+mod worker;
+mod spawn;
+mod runner;
+
+pub use self::spawn::{Remote, Local, build_spawn};
+pub use self::builder::SchedConfig;
+pub use self::runner::{Runner, CloneRunnerBuilder, RunnerBuilder};
+pub use self::builder::Builder;
 
 use crate::queue::TaskCell;
 use std::mem;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::Duration;
-
-/// Configuration for schedule algorithm.
-#[derive(Clone)]
-pub(crate) struct SchedConfig {
-    /// The maximum number of running threads at the same time.
-    pub max_thread_count: usize,
-    /// The minimum number of running threads at the same time.
-    pub min_thread_count: usize,
-    /// The maximum tries to rerun an unfinished task before pushing
-    /// back to queue.
-    pub max_inplace_spin: usize,
-    /// The maximum allowed idle time for a thread. Thread will only be
-    /// woken up when algorithm thinks it needs more worker.
-    pub max_idle_time: Duration,
-    /// The maximum time to wait for a task before increasing the
-    /// running thread slots.
-    pub max_wait_time: Duration,
-    /// The minimum interval between waking a thread.
-    pub wake_backoff: Duration,
-    /// The minimum interval between increasing running threads.
-    pub alloc_slot_backoff: Duration,
-}
 
 /// A generic thread pool.
 pub struct ThreadPool<T: TaskCell + Send> {

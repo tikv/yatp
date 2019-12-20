@@ -39,6 +39,17 @@ impl crate::queue::TaskCell for TaskCell {
     }
 }
 
+impl<F> From<F> for TaskCell
+where F: FnOnce(&mut Handle<'_>) + Send + 'static
+{
+    fn from(f: F) -> TaskCell {
+        TaskCell {
+            task: Task::new_once(f),
+            extras: Extras::default(),
+        }
+    }
+}
+
 /// Handle passed to the task closure.
 ///
 /// It can be used to spawn new tasks or control whether this task should be
@@ -119,7 +130,7 @@ impl Clone for Runner {
     }
 }
 
-impl crate::Runner for Runner {
+impl crate::pool::Runner for Runner {
     type TaskCell = TaskCell;
 
     fn handle(&mut self, spawn: &mut Local<TaskCell>, mut task_cell: TaskCell) -> bool {
@@ -155,32 +166,17 @@ impl crate::Runner for Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Runner as _;
-
+    use crate::queue;
+    use crate::pool::{Runner as _, build_spawn};
     use std::sync::mpsc;
-
-    #[derive(Default)]
-    struct MockSpawn {
-        spawn_times: usize,
-    }
-
-    impl MockSpawn {
-        fn spawn(&mut self, _t: TaskCell) {
-            self.spawn_times += 1;
-        }
-
-        fn remote(&self) -> Self::Remote {
-            unimplemented!()
-        }
-    }
 
     #[test]
     fn test_once() {
+        let (_, mut locals) = build_spawn(queue::simple, Default::default());
         let mut runner = Runner::default();
-        let mut spawn = MockSpawn::default();
         let (tx, rx) = mpsc::channel();
         runner.handle(
-            &mut spawn,
+            &mut locals[0],
             TaskCell {
                 task: Task::new_once(move |_| {
                     tx.send(42).unwrap();
@@ -193,13 +189,13 @@ mod tests {
 
     #[test]
     fn test_mut_no_respawn() {
+        let (_, mut locals) = build_spawn(queue::simple, Default::default());
         let mut runner = Runner::new(1);
-        let mut spawn = MockSpawn::default();
         let (tx, rx) = mpsc::channel();
 
         let mut times = 0;
         runner.handle(
-            &mut spawn,
+            &mut locals[0],
             TaskCell {
                 task: Task::new_mut(move |handle| {
                     tx.send(42).unwrap();
@@ -213,19 +209,19 @@ mod tests {
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
-        assert_eq!(spawn.spawn_times, 0);
+        assert!(locals[0].pop().is_none());
         assert!(rx.recv().is_err());
     }
 
     #[test]
     fn test_mut_respawn() {
+        let (_, mut locals) = build_spawn(queue::simple, Default::default());
         let mut runner = Runner::new(1);
-        let mut spawn = MockSpawn::default();
         let (tx, rx) = mpsc::channel();
 
         let mut times = 0;
         runner.handle(
-            &mut spawn,
+            &mut locals[0],
             TaskCell {
                 task: Task::new_mut(move |handle| {
                     tx.send(42).unwrap();
@@ -239,7 +235,7 @@ mod tests {
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
-        assert_eq!(spawn.spawn_times, 1);
+        assert!(locals[0].pop().is_some());
         assert!(rx.recv().is_err());
     }
 }

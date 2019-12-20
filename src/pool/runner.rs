@@ -64,6 +64,7 @@ pub trait RunnerBuilder {
     fn build(&mut self) -> Self::Runner;
 }
 
+/// A builder that create new Runner by cloning the old one.
 pub struct CloneRunnerBuilder<R>(pub R);
 
 impl<R: Runner + Clone> RunnerBuilder for CloneRunnerBuilder<R> {

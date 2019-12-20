@@ -2,12 +2,47 @@
 
 use crate::pool::worker::WorkerThread;
 use crate::pool::spawn::QueueCore;
-use crate::pool::{Remote, Local, SchedConfig, ThreadPool};
+use crate::pool::{Remote, Local, ThreadPool, Runner, RunnerBuilder};
 use crate::queue::{LocalQueue, TaskInjector, TaskCell};
-use crate::runner::{Runner, RunnerBuilder};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+/// Configuration for schedule algorithm.
+#[derive(Clone)]
+pub struct SchedConfig {
+    /// The maximum number of running threads at the same time.
+    pub max_thread_count: usize,
+    /// The minimum number of running threads at the same time.
+    pub min_thread_count: usize,
+    /// The maximum tries to rerun an unfinished task before pushing
+    /// back to queue.
+    pub max_inplace_spin: usize,
+    /// The maximum allowed idle time for a thread. Thread will only be
+    /// woken up when algorithm thinks it needs more worker.
+    pub max_idle_time: Duration,
+    /// The maximum time to wait for a task before increasing the
+    /// running thread slots.
+    pub max_wait_time: Duration,
+    /// The minimum interval between waking a thread.
+    pub wake_backoff: Duration,
+    /// The minimum interval between increasing running threads.
+    pub alloc_slot_backoff: Duration,
+}
+
+impl Default for SchedConfig {
+    fn default() -> SchedConfig {
+        SchedConfig {
+            max_thread_count: num_cpus::get(),
+            min_thread_count: 1,
+            max_inplace_spin: 4,
+            max_idle_time: Duration::from_millis(1),
+            max_wait_time: Duration::from_millis(1),
+            wake_backoff: Duration::from_millis(1),
+            alloc_slot_backoff: Duration::from_millis(2),
+        }
+    }
+}
 
 /// A builder for lazy spawning.
 pub struct LazyBuilder<T> {
@@ -78,15 +113,7 @@ impl Builder {
         Builder {
             name_prefix: name_prefix.into(),
             stack_size: None,
-            sched_config: SchedConfig {
-                max_thread_count: num_cpus::get(),
-                min_thread_count: 1,
-                max_inplace_spin: 4,
-                max_idle_time: Duration::from_millis(1),
-                max_wait_time: Duration::from_millis(1),
-                wake_backoff: Duration::from_millis(1),
-                alloc_slot_backoff: Duration::from_millis(2),
-            },
+            sched_config: SchedConfig::default(),
         }
     }
 
