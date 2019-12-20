@@ -2,15 +2,15 @@
 
 //! The pool implement details.
 //!
-//! To build your own runners, you need to implement
+//! To build your own thread pool while reusing the scheduling design of
+//! the crate, you need to implement `Runner` trait.
 
 mod builder;
 mod runner;
 mod spawn;
 mod worker;
 
-pub use self::builder::Builder;
-pub use self::builder::SchedConfig;
+pub use self::builder::{Builder, SchedConfig};
 pub use self::runner::{CloneRunnerBuilder, Runner, RunnerBuilder};
 pub use self::spawn::{build_spawn, Local, Remote};
 
