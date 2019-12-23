@@ -28,27 +28,27 @@ pub trait Runner {
     /// Called when the runner is started.
     ///
     /// It's guaranteed to be the first method to call before anything else.
-    fn start(&mut self, _spawn: &mut Local<Self::TaskCell>) {}
+    fn start(&mut self, _local: &mut Local<Self::TaskCell>) {}
 
     /// Called when a task needs to be handled.
     ///
     /// It's possible that a task can't be finished in a single execution, in
     /// which case feel free to spawn the task again and return false to
     /// indicate the task has not been finished yet.
-    fn handle(&mut self, spawn: &mut Local<Self::TaskCell>, task_cell: Self::TaskCell) -> bool;
+    fn handle(&mut self, local: &mut Local<Self::TaskCell>, task_cell: Self::TaskCell) -> bool;
 
     /// Called when the runner is put to sleep.
-    fn pause(&mut self, _spawn: &mut Local<Self::TaskCell>) -> bool {
+    fn pause(&mut self, _local: &mut Local<Self::TaskCell>) -> bool {
         true
     }
 
     /// Called when the runner is woken up.
-    fn resume(&mut self, _spawn: &mut Local<Self::TaskCell>) {}
+    fn resume(&mut self, _local: &mut Local<Self::TaskCell>) {}
 
     /// Called when the runner is about to be destroyed.
     ///
     /// It's guaranteed that no other method will be called after this method.
-    fn end(&mut self, _spawn: &mut Local<Self::TaskCell>) {}
+    fn end(&mut self, _local: &mut Local<Self::TaskCell>) {}
 }
 
 /// A builder trait that produce `Runner`.

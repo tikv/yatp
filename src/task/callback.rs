@@ -56,14 +56,14 @@ where
 /// It can be used to spawn new tasks or control whether this task should be
 /// rerun.
 pub struct Handle<'a> {
-    spawn: &'a mut Local<TaskCell>,
+    local: &'a mut Local<TaskCell>,
     rerun: bool,
 }
 
 impl<'a> Handle<'a> {
     /// Spawns a [`FnOnce`] to the thread pool.
     pub fn spawn_once(&mut self, t: impl FnOnce(&mut Handle<'_>) + Send + 'static, extras: Extras) {
-        self.spawn.spawn(TaskCell {
+        self.local.spawn(TaskCell {
             task: Task::new_once(t),
             extras,
         });
@@ -71,7 +71,7 @@ impl<'a> Handle<'a> {
 
     /// Spawns a [`FnMut`] to the thread pool.
     pub fn spawn_mut(&mut self, t: impl FnMut(&mut Handle<'_>) + Send + 'static, extras: Extras) {
-        self.spawn.spawn(TaskCell {
+        self.local.spawn(TaskCell {
             task: Task::new_mut(t),
             extras,
         });
@@ -123,9 +123,9 @@ impl Clone for Runner {
 impl crate::pool::Runner for Runner {
     type TaskCell = TaskCell;
 
-    fn handle(&mut self, spawn: &mut Local<TaskCell>, mut task_cell: TaskCell) -> bool {
+    fn handle(&mut self, local: &mut Local<TaskCell>, mut task_cell: TaskCell) -> bool {
         let mut handle = Handle {
-            spawn,
+            local,
             rerun: false,
         };
         match task_cell.task {
@@ -148,7 +148,7 @@ impl crate::pool::Runner for Runner {
                 return true;
             }
         }
-        spawn.spawn(task_cell);
+        local.spawn(task_cell);
         false
     }
 }

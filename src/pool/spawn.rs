@@ -9,7 +9,6 @@ use crate::queue::{LocalQueue, Pop, TaskCell, TaskInjector};
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 /// An usize is used to trace the threads that are working actively.
 /// To save additional memory and atomic operation, the number and
@@ -216,40 +215,35 @@ impl<T: TaskCell + Send> Local<T> {
 
     /// Pops a task from the queue.
     ///
-    /// If there is no tasks at the moment, it will go to sleep until woken
+    /// If there are no tasks at the moment, it will go to sleep until woken
     /// up by other threads.
     pub(crate) fn pop_or_sleep(&mut self) -> Option<Pop<T>> {
         let address = &*self.core as *const QueueCore<T> as usize;
         let mut task = None;
-        let mut timeout = Some(Instant::now() + self.core.config.max_idle_time);
         let id = self.id;
-        loop {
-            let res = unsafe {
-                parking_lot_core::park(
-                    address,
-                    || {
-                        if timeout.is_some() && !self.core.mark_sleep() || self.core.is_shutdown() {
-                            return false;
-                        }
-                        task = self.local_queue.pop();
-                        task.is_none()
-                    },
-                    || {},
-                    |_, _| {},
-                    ParkToken(id),
-                    timeout,
-                )
-            };
-            return match res {
-                ParkResult::Unparked(_) | ParkResult::Invalid => {
-                    self.core.mark_woken();
-                    task
-                }
-                ParkResult::TimedOut => {
-                    timeout = None;
-                    continue;
-                }
-            };
+
+        let res = unsafe {
+            parking_lot_core::park(
+                address,
+                || {
+                    if !self.core.mark_sleep() {
+                        return false;
+                    }
+                    task = self.local_queue.pop();
+                    task.is_none()
+                },
+                || {},
+                |_, _| {},
+                ParkToken(id),
+                None,
+            )
+        };
+        match res {
+            ParkResult::Unparked(_) | ParkResult::Invalid => {
+                self.core.mark_woken();
+                task
+            }
+            ParkResult::TimedOut => unreachable!(),
         }
     }
 }
@@ -258,7 +252,6 @@ impl<T: TaskCell + Send> Local<T> {
 ///
 /// This is only for tests purpose so that a thread pool doesn't have to be
 /// spawned to test a Runner.
-#[doc(hidden)]
 pub fn build_spawn<F, T>(f: F, config: SchedConfig) -> (Remote<T>, Vec<Local<T>>)
 where
     F: FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
