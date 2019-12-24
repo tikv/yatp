@@ -46,7 +46,7 @@ where
     fn from(f: F) -> TaskCell {
         TaskCell {
             task: Task::new_once(f),
-            extras: Extras::default(),
+            extras: Extras::simple_default(),
         }
     }
 }

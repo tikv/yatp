@@ -7,7 +7,7 @@
 //! used to collect necessary information.
 
 use super::{InjectorInner, LocalQueue, LocalQueueInner, Pop, TaskCell, TaskInjector};
-use crate::pool::{LocalSpawn, Runner, RunnerBuilder};
+use crate::pool::{Local, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use dashmap::DashMap;
@@ -77,8 +77,6 @@ pub struct QueueLocal<T> {
     manager: Arc<LevelManager>,
     rng: SmallRng,
 }
-
-impl<T> QueueLocal<T> {}
 
 impl<T> QueueLocal<T>
 where
@@ -169,12 +167,11 @@ pub struct MultilevelRunnerBuilder<B> {
     manager: Arc<LevelManager>,
 }
 
-impl<B, R, S, T> RunnerBuilder for MultilevelRunnerBuilder<B>
+impl<B, R, T> RunnerBuilder for MultilevelRunnerBuilder<B>
 where
     B: RunnerBuilder<Runner = R>,
-    R: Runner<Spawn = S>,
-    S: LocalSpawn<TaskCell = T>,
-    T: TaskCell + Send,
+    R: Runner<TaskCell = T>,
+    T: TaskCell,
 {
     type Runner = MultilevelRunner<R>;
 
@@ -195,28 +192,23 @@ pub struct MultilevelRunner<R> {
     manager: Arc<LevelManager>,
 }
 
-impl<R, S, T> Runner for MultilevelRunner<R>
+impl<R, T> Runner for MultilevelRunner<R>
 where
-    R: Runner<Spawn = S>,
-    S: LocalSpawn<TaskCell = T>,
-    T: TaskCell + Send,
+    R: Runner<TaskCell = T>,
+    T: TaskCell,
 {
-    type Spawn = R::Spawn;
+    type TaskCell = T;
 
-    fn start(&mut self, spawn: &mut Self::Spawn) {
-        self.inner.start(spawn)
+    fn start(&mut self, local: &mut Local<T>) {
+        self.inner.start(local)
     }
 
-    fn handle(
-        &mut self,
-        spawn: &mut Self::Spawn,
-        mut task_cell: <Self::Spawn as LocalSpawn>::TaskCell,
-    ) -> bool {
+    fn handle(&mut self, local: &mut Local<T>, mut task_cell: T) -> bool {
         let extras = task_cell.mut_extras();
         let running_time = extras.running_time.clone();
         let level = extras.current_level;
         let begin = Instant::now();
-        let res = self.inner.handle(spawn, task_cell);
+        let res = self.inner.handle(local, task_cell);
         let elapsed = begin.elapsed();
         if let Some(running_time) = running_time {
             running_time.inc_by(elapsed);
@@ -233,16 +225,16 @@ where
         res
     }
 
-    fn pause(&mut self, spawn: &mut Self::Spawn) -> bool {
-        self.inner.pause(spawn)
+    fn pause(&mut self, local: &mut Local<T>) -> bool {
+        self.inner.pause(local)
     }
 
-    fn resume(&mut self, spawn: &mut Self::Spawn) {
-        self.inner.resume(spawn)
+    fn resume(&mut self, local: &mut Local<T>) {
+        self.inner.resume(local)
     }
 
-    fn end(&mut self, spawn: &mut Self::Spawn) {
-        self.inner.end(spawn)
+    fn end(&mut self, local: &mut Local<T>) {
+        self.inner.end(local)
     }
 }
 
@@ -528,8 +520,6 @@ thread_local!(static RECENT_NOW: Cell<Instant> = Cell::new(Instant::now()));
 
 /// Returns an instant corresponding to now and updates the thread-local recent
 /// now.
-///
-/// You should only use it when the thread-local recent now is recently updated.
 fn now() -> Instant {
     let res = Instant::now();
     RECENT_NOW.with(|r| r.set(res));
@@ -538,6 +528,8 @@ fn now() -> Instant {
 
 /// Returns the thread-local recent now. It is used to save the cost of calling
 /// `Instant::now` frequently.
+///
+/// You should only use it when the thread-local recent now is recently updated.
 fn recent() -> Instant {
     RECENT_NOW.with(|r| r.get())
 }
@@ -545,7 +537,7 @@ fn recent() -> Instant {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pool::{LocalSpawn, RemoteSpawn};
+    use crate::pool::build_spawn;
     use crate::queue::Extras;
 
     use std::thread;
@@ -595,26 +587,6 @@ mod tests {
         assert_eq!(map.get_elapsed(ID1).as_duration(), Duration::from_secs(0));
     }
 
-    #[derive(Default)]
-    struct MockSpawn;
-
-    impl LocalSpawn for MockSpawn {
-        type TaskCell = MockTask;
-        type Remote = MockSpawn;
-
-        fn spawn(&mut self, _t: MockTask) {}
-
-        fn remote(&self) -> Self::Remote {
-            unimplemented!()
-        }
-    }
-
-    impl RemoteSpawn for MockSpawn {
-        type TaskCell = MockTask;
-
-        fn spawn(&self, _t: MockTask) {}
-    }
-
     #[derive(Debug)]
     struct MockTask {
         sleep_ms: u64,
@@ -636,9 +608,9 @@ mod tests {
     struct MockRunner;
 
     impl Runner for MockRunner {
-        type Spawn = MockSpawn;
+        type TaskCell = MockTask;
 
-        fn handle(&mut self, _spawn: &mut Self::Spawn, task_cell: MockTask) -> bool {
+        fn handle(&mut self, _local: &mut Local<MockTask>, task_cell: MockTask) -> bool {
             thread::sleep(Duration::from_millis(task_cell.sleep_ms));
             true
         }
@@ -806,14 +778,29 @@ mod tests {
     fn test_runner_records_handle_time() {
         let builder = Builder::new(Config::default());
         let mut runner_builder = builder.runner_builder(MockRunnerBuilder);
-        let (injector, mut locals) = builder.build_raw(1);
+        let mut injector_clone: Option<QueueInjector<MockTask>> = None;
+        let injector_ref = &mut injector_clone;
+        let (remote, mut locals) = build_spawn(
+            move |local_num| {
+                let (injector, locals) = builder.build_raw(local_num);
+                *injector_ref = Some(injector.clone());
+                (
+                    TaskInjector(InjectorInner::Multilevel(injector)),
+                    locals
+                        .into_iter()
+                        .map(|local| LocalQueue(LocalQueueInner::Multilevel(local)))
+                        .collect(),
+                )
+            },
+            Default::default(),
+        );
         let mut runner = runner_builder.build();
-        let mut spawn = MockSpawn;
 
-        injector.push(MockTask::new(100, Extras::new_multilevel(ID1, None)));
+        remote.spawn(MockTask::new(100, Extras::new_multilevel(ID1, None)));
         if let Some(Pop { task_cell, .. }) = locals[0].pop() {
-            assert!(runner.handle(&mut spawn, task_cell));
+            assert!(runner.handle(&mut locals[0], task_cell));
         }
+        let injector = injector_clone.unwrap();
         assert!(
             injector
                 .manager
