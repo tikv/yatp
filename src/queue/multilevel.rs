@@ -7,7 +7,7 @@
 //! used to collect necessary information.
 
 use super::{InjectorInner, LocalQueue, LocalQueueInner, Pop, TaskCell, TaskInjector};
-use crate::runner::{LocalSpawn, Runner, RunnerBuilder};
+use crate::pool::{LocalSpawn, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use dashmap::DashMap;
@@ -544,8 +544,8 @@ fn recent() -> Instant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::{LocalSpawn, RemoteSpawn};
     use crate::queue::Extras;
-    use crate::runner::{LocalSpawn, RemoteSpawn};
 
     use std::thread;
 

@@ -4,11 +4,8 @@
 
 //! Yatp is a thread pool that tries to be adaptive, responsive and generic.
 
-mod pool;
-mod runner;
-
+pub mod pool;
 pub mod queue;
 pub mod task;
 
 pub use self::pool::{Builder, Remote, ThreadPool};
-pub use self::runner::{LocalSpawn, RemoteSpawn, Runner, RunnerBuilder};

@@ -2,8 +2,8 @@
 
 //! A [`Future`].
 
+use crate::pool::{LocalSpawn, RemoteSpawn};
 use crate::queue::Extras;
-use crate::{LocalSpawn, RemoteSpawn};
 
 use std::cell::UnsafeCell;
 use std::future::Future;
@@ -208,7 +208,7 @@ impl<Spawn> Runner<Spawn> {
     }
 }
 
-impl<L, R> crate::Runner for Runner<L>
+impl<L, R> crate::pool::Runner for Runner<L>
 where
     L: LocalSpawn<TaskCell = TaskCell<R>, Remote = R>,
     R: RemoteSpawn<TaskCell = TaskCell<R>>,
@@ -247,7 +247,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RemoteSpawn, Runner as _};
+    use crate::pool::{RemoteSpawn, Runner as _};
 
     use std::cell::RefCell;
     use std::rc::Rc;
