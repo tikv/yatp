@@ -8,10 +8,11 @@
 mod builder;
 mod runner;
 mod spawn;
+mod worker;
 
 pub use self::builder::{Builder, SchedConfig};
 pub use self::runner::{CloneRunnerBuilder, Runner, RunnerBuilder};
-pub use self::spawn::{LocalSpawn, Remote, RemoteSpawn};
+pub use self::spawn::{build_spawn, Local, Remote};
 
 use crate::queue::TaskCell;
 use std::mem;
@@ -36,6 +37,7 @@ impl<T: TaskCell + Send> ThreadPool<T> {
     ///
     /// Closes the queue and wait for all threads to exit.
     pub fn shutdown(&self) {
+        self.remote.stop();
         let mut threads = mem::replace(&mut *self.threads.lock().unwrap(), Vec::new());
         for j in threads.drain(..) {
             j.join().unwrap();
@@ -54,3 +56,6 @@ impl<T: TaskCell + Send> Drop for ThreadPool<T> {
         self.shutdown();
     }
 }
+
+#[cfg(test)]
+mod tests;

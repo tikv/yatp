@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
-/// The extras for the task cells pushed into a task queue.
+/// The extras for the task cells pushed into a queue.
 #[derive(Debug, Clone)]
 pub struct Extras {
     /// The instant when the task cell is pushed to the queue.

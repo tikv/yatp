@@ -1,6 +1,8 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::pool::{Remote, Runner, RunnerBuilder, ThreadPool};
+use crate::pool::spawn::QueueCore;
+use crate::pool::worker::WorkerThread;
+use crate::pool::{Local, Remote, Runner, RunnerBuilder, ThreadPool};
 use crate::queue::{LocalQueue, TaskCell, TaskInjector};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -45,7 +47,7 @@ impl Default for SchedConfig {
 /// A builder for lazy spawning.
 pub struct LazyBuilder<T> {
     builder: Builder,
-    injector: Arc<TaskInjector<T>>,
+    core: Arc<QueueCore<T>>,
     local_queues: Vec<LocalQueue<T>>,
 }
 
@@ -70,27 +72,28 @@ where
     pub fn build<F>(self, mut factory: F) -> ThreadPool<T>
     where
         F: RunnerBuilder,
-        F::Runner: Runner + Send + 'static,
+        F::Runner: Runner<TaskCell = T> + Send + 'static,
     {
         let mut threads = Vec::with_capacity(self.builder.sched_config.max_thread_count);
         for (i, local_queue) in self.local_queues.into_iter().enumerate() {
-            let _r = factory.build();
+            let runner = factory.build();
             let name = format!("{}-{}", self.builder.name_prefix, i);
             let mut builder = thread::Builder::new().name(name);
             if let Some(size) = self.builder.stack_size {
                 builder = builder.stack_size(size)
             }
+            let local = Local::new(i + 1, local_queue, self.core.clone());
+            let thd = WorkerThread::new(local, runner);
             threads.push(
                 builder
                     .spawn(move || {
-                        drop(local_queue);
-                        unimplemented!()
+                        thd.run();
                     })
                     .unwrap(),
             );
         }
         ThreadPool {
-            remote: Remote::new(self.injector),
+            remote: Remote::new(self.core.clone()),
             threads: Mutex::new(threads),
         }
     }
@@ -189,13 +192,13 @@ impl Builder {
     {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
         let (injector, local_queues) = queue_builder(self.sched_config.max_thread_count);
-        let injector = Arc::new(injector);
+        let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));
 
         (
-            Remote::new(injector.clone()),
+            Remote::new(core.clone()),
             LazyBuilder {
                 builder: self.clone(),
-                injector,
+                core,
                 local_queues,
             },
         )
@@ -213,7 +216,7 @@ impl Builder {
     where
         T: TaskCell + Send + 'static,
         B: RunnerBuilder,
-        B::Runner: Runner + Send + 'static,
+        B::Runner: Runner<TaskCell = T> + Send + 'static,
     {
         self.freeze(queue_builder).1.build(runner_builder)
     }
