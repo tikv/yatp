@@ -2,9 +2,9 @@
 
 use std::time::Instant;
 
-/// The extras for the task cells pushed into a simple task queue.
+/// The extras for the task cells pushed into a queue.
 ///
-/// [`Default::default`] can be used to create a [`Extras`] for a task cell.
+/// [`Default::default`] can be used to create an [`Extras`] for a task cell.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Extras {
     /// The instant when the task cell is pushed to the queue.
