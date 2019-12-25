@@ -359,10 +359,10 @@ impl TaskElapsedMap {
         if let Some(v) = new_map.get(&key) {
             return v.clone();
         }
-        let elapsed = match old_map.remove(&key) {
-            Some((_, v)) => {
+        let elapsed = match old_map.get(&key) {
+            Some(v) => {
                 new_map.insert(key, v.clone());
-                v
+                v.clone()
             }
             _ => {
                 let v = new_map.get_or_insert_with(&key, Default::default);
