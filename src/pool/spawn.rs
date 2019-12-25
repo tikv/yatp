@@ -52,7 +52,7 @@ impl<T> QueueCore<T> {
     /// If the method is going to wake up any threads, source is used to trace who triggers
     /// the action.
     pub fn ensure_workers(&self, source: usize) {
-        let cnt = self.active_workers.load(Ordering::Relaxed);
+        let cnt = self.active_workers.load(Ordering::SeqCst);
         if (cnt >> WORKER_COUNT_SHIFT) >= self.config.max_thread_count || is_shutdown(cnt) {
             return;
         }
