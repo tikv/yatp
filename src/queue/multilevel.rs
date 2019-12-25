@@ -11,7 +11,6 @@ use crate::pool::{Local, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use dashmap::DashMap;
-use init_with::InitWith;
 use rand::prelude::*;
 use std::cell::Cell;
 use std::cmp;
@@ -19,7 +18,6 @@ use std::iter;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 
 const LEVEL_NUM: usize = 3;
 
@@ -331,7 +329,7 @@ thread_local!(static TLS_LAST_CLEANUP_TIME: Cell<Instant> = Cell::new(Instant::n
 
 struct TaskElapsedMap {
     new_index: AtomicUsize,
-    maps: [DashMap<Uuid, Arc<ElapsedTime>>; 2],
+    maps: [DashMap<u64, Arc<ElapsedTime>>; 2],
     cleanup_interval: Duration,
     last_cleanup_time: RwLock<Instant>,
     cleaning_up: AtomicBool,
@@ -354,7 +352,7 @@ impl TaskElapsedMap {
         }
     }
 
-    fn get_elapsed(&self, key: Uuid) -> Arc<ElapsedTime> {
+    fn get_elapsed(&self, key: u64) -> Arc<ElapsedTime> {
         let new_index = self.new_index.load(SeqCst);
         let new_map = &self.maps[new_index];
         let old_map = &self.maps[new_index ^ 1];
@@ -468,7 +466,7 @@ impl Builder {
 
     fn build_raw<T>(self, local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
         let level_injectors: Arc<[Injector<T>; LEVEL_NUM]> =
-            Arc::new(InitWith::init_with(Injector::new));
+            Arc::new([Injector::new(), Injector::new(), Injector::new()]);
         let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)
             .take(local_num)
             .collect();
@@ -542,49 +540,43 @@ mod tests {
 
     use std::thread;
 
-    const ID1: Uuid = Uuid::from_u128(1);
-    const ID2: Uuid = Uuid::from_u128(2);
-
     #[test]
     fn test_task_elapsed_map_increase() {
         let map = TaskElapsedMap::default();
-        map.get_elapsed(ID1).inc_by(Duration::from_secs(1));
-        map.get_elapsed(ID2).inc_by(Duration::from_millis(500));
-        map.get_elapsed(ID1).inc_by(Duration::from_millis(500));
+        map.get_elapsed(1).inc_by(Duration::from_secs(1));
+        map.get_elapsed(2).inc_by(Duration::from_millis(500));
+        map.get_elapsed(1).inc_by(Duration::from_millis(500));
         assert_eq!(
-            map.get_elapsed(ID1).as_duration(),
+            map.get_elapsed(1).as_duration(),
             Duration::from_millis(1500)
         );
-        assert_eq!(
-            map.get_elapsed(ID2).as_duration(),
-            Duration::from_millis(500)
-        );
+        assert_eq!(map.get_elapsed(2).as_duration(), Duration::from_millis(500));
     }
 
     #[test]
     fn test_task_elapsed_map_cleanup() {
         let map = TaskElapsedMap::new(Duration::from_millis(200));
-        map.get_elapsed(ID1).inc_by(Duration::from_secs(1));
+        map.get_elapsed(1).inc_by(Duration::from_secs(1));
 
         // Trigger a cleanup
         thread::sleep(Duration::from_millis(200));
         now(); // Update recent now
-        map.get_elapsed(ID2).inc_by(Duration::from_secs(1));
+        map.get_elapsed(2).inc_by(Duration::from_secs(1));
         // After one cleanup, we can still read the old stats
-        assert_eq!(map.get_elapsed(ID1).as_duration(), Duration::from_secs(1));
+        assert_eq!(map.get_elapsed(1).as_duration(), Duration::from_secs(1));
 
         // Trigger a cleanup
         thread::sleep(Duration::from_millis(200));
         now();
-        map.get_elapsed(ID2).inc_by(Duration::from_secs(1));
+        map.get_elapsed(2).inc_by(Duration::from_secs(1));
         // Trigger another cleanup
         thread::sleep(Duration::from_millis(200));
         now();
-        map.get_elapsed(ID2).inc_by(Duration::from_secs(1));
-        assert_eq!(map.get_elapsed(ID2).as_duration(), Duration::from_secs(3));
+        map.get_elapsed(2).inc_by(Duration::from_secs(1));
+        assert_eq!(map.get_elapsed(2).as_duration(), Duration::from_secs(3));
 
         // After two cleanups, we won't be able to read the old stats with id = 1
-        assert_eq!(map.get_elapsed(ID1).as_duration(), Duration::from_secs(0));
+        assert_eq!(map.get_elapsed(1).as_duration(), Duration::from_secs(0));
     }
 
     #[derive(Debug)]
@@ -796,7 +788,7 @@ mod tests {
         );
         let mut runner = runner_builder.build();
 
-        remote.spawn(MockTask::new(100, Extras::new_multilevel(ID1, None)));
+        remote.spawn(MockTask::new(100, Extras::new_multilevel(1, None)));
         if let Some(Pop { task_cell, .. }) = locals[0].pop() {
             assert!(runner.handle(&mut locals[0], task_cell));
         }
@@ -805,7 +797,7 @@ mod tests {
             injector
                 .manager
                 .task_elapsed_map
-                .get_elapsed(ID1)
+                .get_elapsed(1)
                 .as_duration()
                 >= Duration::from_millis(100)
         );
