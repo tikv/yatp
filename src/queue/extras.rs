@@ -38,8 +38,8 @@ impl Extras {
     }
 
     /// Creates a default `Extras` for task cells pushed into a multilevel task
-    /// queue. It generates a UUID v4 as task id and does not specify the fixed
-    /// level.
+    /// queue. It generates a random u64 as task id and does not specify the
+    /// fixed level.
     pub fn multilevel_default() -> Extras {
         Self::new_multilevel(thread_rng().next_u64(), None)
     }
