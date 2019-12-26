@@ -16,7 +16,7 @@ use std::cell::Cell;
 use std::cmp;
 use std::iter;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const LEVEL_NUM: usize = 3;
@@ -210,9 +210,7 @@ where
         if level == 0 {
             self.manager.level0_elapsed.inc_by(elapsed);
         }
-        let current_total = Duration::from_micros(
-            self.manager.total_elapsed.inc_by(elapsed) + elapsed.as_micros() as u64,
-        );
+        let current_total = Duration::from_micros(self.manager.total_elapsed.inc_by(elapsed));
         if current_total > ADJUST_CHANCE_INTERVAL {
             self.manager.maybe_adjust_chance();
         }
@@ -312,7 +310,8 @@ impl ElapsedTime {
     }
 
     fn inc_by(&self, t: Duration) -> u64 {
-        self.0.fetch_add(t.as_micros() as u64, SeqCst)
+        let micros = t.as_micros() as u64;
+        self.0.fetch_add(micros, SeqCst) + micros
     }
 
     #[cfg(test)]
@@ -327,7 +326,7 @@ struct TaskElapsedMap {
     new_index: AtomicUsize,
     maps: [DashMap<u64, Arc<ElapsedTime>>; 2],
     cleanup_interval: Duration,
-    last_cleanup_time: RwLock<Instant>,
+    last_cleanup_time: Mutex<Instant>,
     cleaning_up: AtomicBool,
 }
 
@@ -343,7 +342,7 @@ impl TaskElapsedMap {
             new_index: AtomicUsize::new(0),
             maps: Default::default(),
             cleanup_interval,
-            last_cleanup_time: RwLock::new(now()),
+            last_cleanup_time: Mutex::new(now()),
             cleaning_up: AtomicBool::new(false),
         }
     }
@@ -374,7 +373,7 @@ impl TaskElapsedMap {
     }
 
     fn maybe_cleanup(&self) {
-        let last_cleanup_time = *self.last_cleanup_time.read().unwrap();
+        let last_cleanup_time = *self.last_cleanup_time.lock().unwrap();
         let do_cleanup = recent().saturating_duration_since(last_cleanup_time)
             > self.cleanup_interval
             && !self.cleaning_up.compare_and_swap(false, true, SeqCst);
@@ -383,7 +382,7 @@ impl TaskElapsedMap {
             self.maps[old_index].clear();
             self.new_index.store(old_index, SeqCst);
             let now = now();
-            *self.last_cleanup_time.write().unwrap() = now;
+            *self.last_cleanup_time.lock().unwrap() = now;
             self.cleaning_up.store(false, SeqCst);
             now
         } else {
