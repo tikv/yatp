@@ -73,7 +73,6 @@ pub struct QueueLocal<T> {
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
     stealers: Vec<Stealer<T>>,
     manager: Arc<LevelManager>,
-    rng: SmallRng,
 }
 
 impl<T> QueueLocal<T>
@@ -101,40 +100,39 @@ where
         if let Some(t) = self.local_queue.pop() {
             return Some(into_pop(t, true));
         }
-        let mut need_retry;
-        loop {
+        let mut rng = thread_rng();
+        let mut need_retry = true;
+        while need_retry {
             need_retry = false;
-            let expected_level = if self
-                .rng
-                .gen_ratio(self.manager.get_level0_chance(), u32::max_value())
-            {
-                0
-            } else {
-                (1..LEVEL_NUM - 1)
-                    .find(|_| self.rng.gen_ratio(CHANCE_RATIO, CHANCE_RATIO + 1))
-                    .unwrap_or(LEVEL_NUM - 1)
-            };
+            let expected_level =
+                if rng.gen_ratio(self.manager.get_level0_chance(), u32::max_value()) {
+                    0
+                } else {
+                    (1..LEVEL_NUM - 1)
+                        .find(|_| rng.gen_ratio(CHANCE_RATIO, CHANCE_RATIO + 1))
+                        .unwrap_or(LEVEL_NUM - 1)
+                };
             match self.level_injectors[expected_level].steal_batch_and_pop(&self.local_queue) {
                 Steal::Success(t) => return Some(into_pop(t, false)),
                 Steal::Retry => need_retry = true,
                 _ => {}
             }
-            // Steal with a random start to avoid imbalance.
-            let len = self.stealers.len();
-            if len > 0 {
-                let start_index = self.rng.gen_range(0, len);
-                for stealer in self
-                    .stealers
-                    .iter()
-                    .chain(&self.stealers)
-                    .skip(start_index)
-                    .take(len)
-                {
+            if !self.stealers.is_empty() {
+                let mut found = None;
+                for (idx, stealer) in self.stealers.iter().enumerate() {
                     match stealer.steal_batch_and_pop(&self.local_queue) {
-                        Steal::Success(t) => return Some(into_pop(t, false)),
+                        Steal::Success(t) => {
+                            found = Some((idx, into_pop(t, false)));
+                            break;
+                        }
                         Steal::Retry => need_retry = true,
                         _ => {}
                     }
+                }
+                if let Some((idx, task)) = found {
+                    let last_pos = self.stealers.len() - 1;
+                    self.stealers.swap(idx, last_pos);
+                    return Some(task);
                 }
             }
             for injector in self
@@ -150,10 +148,8 @@ where
                     _ => {}
                 }
             }
-            if !need_retry {
-                break None;
-            }
         }
+        None
     }
 }
 
@@ -475,18 +471,19 @@ impl Builder {
             .into_iter()
             .enumerate()
             .map(|(self_index, local_queue)| {
-                let stealers = stealers
+                let mut stealers: Vec<_> = stealers
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| *index != self_index)
                     .map(|(_, stealer)| stealer.clone())
                     .collect();
+                // Steal with a random start to avoid imbalance.
+                stealers.shuffle(&mut thread_rng());
                 QueueLocal {
                     local_queue,
                     level_injectors: level_injectors.clone(),
                     stealers,
                     manager: self.manager.clone(),
-                    rng: SmallRng::from_rng(thread_rng()).unwrap(),
                 }
             })
             .collect();
