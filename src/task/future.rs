@@ -213,6 +213,8 @@ impl crate::pool::Runner for Runner {
 }
 
 /// Gives up a timeslice to the task scheduler.
+///
+/// It is only guaranteed to work in yatp.
 pub async fn reschedule() {
     Reschedule { first_poll: true }.await
 }
@@ -436,9 +438,11 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(3).unwrap();
         };
-        local
-            .remote
-            .spawn(TaskCell::new(fut, local.remote.clone(), Default::default()));
+        local.remote.spawn(TaskCell::new(
+            fut,
+            local.remote.clone(),
+            Extras::simple_default(),
+        ));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
