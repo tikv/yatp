@@ -46,7 +46,7 @@ where
     fn from(f: F) -> TaskCell {
         TaskCell {
             task: Task::new_once(f),
-            extras: Extras::default(),
+            extras: Extras::simple_default(),
         }
     }
 }
@@ -171,7 +171,7 @@ mod tests {
                 task: Task::new_once(move |_| {
                     tx.send(42).unwrap();
                 }),
-                extras: Default::default(),
+                extras: Extras::simple_default(),
             },
         );
         assert_eq!(rx.recv().unwrap(), 42);
@@ -194,7 +194,7 @@ mod tests {
                         handle.set_rerun(true);
                     }
                 }),
-                extras: Default::default(),
+                extras: Extras::simple_default(),
             },
         );
         assert_eq!(rx.recv().unwrap(), 42);
@@ -220,7 +220,7 @@ mod tests {
                         handle.set_rerun(true);
                     }
                 }),
-                extras: Default::default(),
+                extras: Extras::simple_default(),
             },
         );
         assert_eq!(rx.recv().unwrap(), 42);

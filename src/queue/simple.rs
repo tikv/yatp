@@ -153,7 +153,7 @@ mod tests {
         fn new(value: i32) -> Self {
             MockCell {
                 value,
-                extras: Default::default(),
+                extras: Extras::simple_default(),
             }
         }
     }
