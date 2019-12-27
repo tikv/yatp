@@ -5,7 +5,7 @@
 use crate::pool::{Local, Remote};
 use crate::queue::Extras;
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::future::Future;
 use std::mem::ManuallyDrop;
 use std::pin::Pin;
@@ -174,6 +174,10 @@ impl Runner {
     }
 }
 
+thread_local! {
+    static NEED_RESCHEDULE: Cell<bool> = Cell::new(false);
+}
+
 impl crate::pool::Runner for Runner {
     type TaskCell = TaskCell;
 
@@ -192,7 +196,9 @@ impl crate::pool::Runner for Runner {
                 match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
                     Ok(_) => return false,
                     Err(NOTIFIED) => {
-                        if repoll_times >= self.repoll_limit {
+                        if repoll_times >= self.repoll_limit
+                            || NEED_RESCHEDULE.with(|r| r.replace(false))
+                        {
                             task.remote.spawn(clone_task(&*task));
                             return false;
                         } else {
@@ -202,6 +208,34 @@ impl crate::pool::Runner for Runner {
                     _ => unreachable!(),
                 }
             }
+        }
+    }
+}
+
+/// Gives up a timeslice to the task scheduler.
+///
+/// It is only guaranteed to work in yatp.
+pub async fn reschedule() {
+    Reschedule { first_poll: true }.await
+}
+
+struct Reschedule {
+    first_poll: bool,
+}
+
+impl Future for Reschedule {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        if self.first_poll {
+            self.first_poll = false;
+            NEED_RESCHEDULE.with(|r| {
+                r.set(true);
+            });
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        } else {
+            Poll::Ready(())
         }
     }
 }
@@ -390,5 +424,31 @@ mod tests {
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 4);
+    }
+
+    #[test]
+    fn test_reschedule() {
+        let mut local = MockLocal::default();
+        let (res_tx, res_rx) = mpsc::channel();
+
+        let fut = async move {
+            res_tx.send(1).unwrap();
+            reschedule().await;
+            res_tx.send(2).unwrap();
+            PendingOnce::new().await;
+            res_tx.send(3).unwrap();
+        };
+        local.remote.spawn(TaskCell::new(
+            fut,
+            local.remote.clone(),
+            Extras::simple_default(),
+        ));
+
+        local.handle_once();
+        assert_eq!(res_rx.recv().unwrap(), 1);
+        assert!(res_rx.try_recv().is_err());
+        local.handle_once();
+        assert_eq!(res_rx.recv().unwrap(), 2);
+        assert_eq!(res_rx.recv().unwrap(), 3);
     }
 }
