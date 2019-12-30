@@ -152,6 +152,7 @@ unsafe fn clone_task(task: *const Task) -> TaskCell {
 }
 
 /// [`Future`] task runner.
+#[derive(Clone)]
 pub struct Runner {
     repoll_limit: usize,
 }

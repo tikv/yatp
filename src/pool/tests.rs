@@ -1,8 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::pool::*;
-use crate::queue;
-use crate::task::callback::{Handle, Runner};
+use crate::task::callback::Handle;
 use rand::seq::SliceRandom;
 use std::sync::mpsc;
 use std::thread;
@@ -10,10 +9,9 @@ use std::time::*;
 
 #[test]
 fn test_basic() {
-    let r = Runner::new(3);
-    let mut builder = Builder::new("test_basic");
-    builder.max_thread_count(4);
-    let pool = builder.build(queue::simple, CloneRunnerBuilder(r));
+    let pool = Builder::new("test_basic")
+        .max_thread_count(4)
+        .build_callback_pool();
     let (tx, rx) = mpsc::channel();
 
     // Task should be executed immediately.
@@ -81,10 +79,9 @@ fn test_basic() {
 
 #[test]
 fn test_remote() {
-    let r = Runner::new(3);
-    let mut builder = Builder::new("test_remote");
-    builder.max_thread_count(4);
-    let pool = builder.build(queue::simple, CloneRunnerBuilder(r));
+    let pool = Builder::new("test_remote")
+        .max_thread_count(4)
+        .build_callback_pool();
 
     // Remote should work just like pool.
     let remote = pool.remote();
