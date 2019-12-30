@@ -17,7 +17,7 @@ fn test_basic() {
     // Task should be executed immediately.
     let t = tx.clone();
     pool.spawn(move |_: &mut Handle<'_>| t.send(1).unwrap());
-    assert_eq!(Ok(1), rx.recv_timeout(Duration::from_millis(10)));
+    assert_eq!(Ok(1), rx.recv_timeout(Duration::from_secs(1)));
 
     // Tasks should be executed concurrently.
     let mut pairs = vec![];
@@ -34,7 +34,7 @@ fn test_basic() {
     for (tx, rx) in pairs {
         let value: u64 = rand::random();
         tx.send(value).unwrap();
-        assert_eq!(value, rx.recv_timeout(Duration::from_millis(1000)).unwrap());
+        assert_eq!(value, rx.recv_timeout(Duration::from_secs(1)).unwrap());
     }
 
     // A bunch of tasks should be executed correctly.
@@ -46,7 +46,7 @@ fn test_basic() {
     }
     let mut ans = vec![];
     for _ in 10..1000 {
-        let r = rx.recv_timeout(Duration::from_millis(1000)).unwrap();
+        let r = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         ans.push(r);
     }
     ans.sort();
