@@ -1,6 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! A work stealing task queue.
+//! A single level work stealing task queue.
 //!
 //! The instant when the task cell is pushed into the queue is recorded
 //! in the extras.
@@ -13,7 +13,7 @@ use std::iter;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// The injector of a work stealing task queue.
+/// The injector of a single level work stealing task queue.
 pub struct TaskInjector<T>(Arc<Injector<T>>);
 
 impl<T: TaskCell> Clone for TaskInjector<T> {
@@ -41,7 +41,7 @@ where
     }
 }
 
-/// The local queue of a work stealing task queue.
+/// The local queue of a single level work stealing task queue.
 pub struct LocalQueue<T> {
     local_queue: Worker<T>,
     injector: Arc<Injector<T>>,
@@ -104,7 +104,7 @@ where
     }
 }
 
-/// Creates a work stealing task queue with `local_num` local queues.
+/// Creates a single level work stealing task queue with `local_num` local queues.
 pub fn create<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
     let injector = Arc::new(Injector::new());
     let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)

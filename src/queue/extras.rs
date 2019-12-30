@@ -25,7 +25,7 @@ pub struct Extras {
 }
 
 impl Extras {
-    /// Creates a default `Extras` for task cells pushed into a work stealing
+    /// Creates a default `Extras` for task cells pushed into a single level
     /// task queue.
     pub fn single_level() -> Extras {
         Extras {
