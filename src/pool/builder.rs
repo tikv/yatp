@@ -178,7 +178,7 @@ impl Builder {
     /// Freezes the configurations and returns the task scheduler and
     /// a builder to for lazy spawning threads.
     ///
-    /// It internally uses simple queue to setup the pool.
+    /// It internally uses single level queue to setup the pool.
     ///
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
@@ -187,7 +187,7 @@ impl Builder {
     where
         T: TaskCell + Send,
     {
-        self.freeze_with_queue(queue::simple)
+        self.freeze_with_queue(queue::single_level)
     }
 
     /// Freezes the configurations and returns the task scheduler and
@@ -222,18 +222,18 @@ impl Builder {
 
     /// Spawns a callback pool.
     ///
-    /// It setups the pool with simple queue.
+    /// It setups the pool with single level queue.
     pub fn build_callback_pool(&self) -> ThreadPool<callback::TaskCell> {
         let rb = CloneRunnerBuilder(callback::Runner::default());
-        self.build_with_queue_and_runner(queue::simple, rb)
+        self.build_with_queue_and_runner(queue::single_level, rb)
     }
 
     /// Spawns a future pool.
     ///
-    /// It setups the pool with simple queue.
+    /// It setups the pool with single level queue.
     pub fn build_future_pool<T, B>(&self) -> ThreadPool<future::TaskCell> {
         let fb = CloneRunnerBuilder(future::Runner::default());
-        self.build_with_queue_and_runner(queue::simple, fb)
+        self.build_with_queue_and_runner(queue::single_level, fb)
     }
 
     /// Spawns the thread pool immediately.

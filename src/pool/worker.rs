@@ -121,7 +121,7 @@ mod tests {
         };
         let metrics = r.metrics.clone();
         let mut expected_metrics = Metrics::default();
-        let (injector, mut locals) = build_spawn(simple, Default::default());
+        let (injector, mut locals) = build_spawn(single_level, Default::default());
         let th = WorkerThread::new(locals.remove(0), r);
         let handle = std::thread::spawn(move || {
             th.run();

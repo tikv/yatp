@@ -259,7 +259,7 @@ mod tests {
 
     impl MockLocal {
         fn new(runner: Runner) -> MockLocal {
-            let (remote, locals) = build_spawn(queue::simple, Default::default());
+            let (remote, locals) = build_spawn(queue::single_level, Default::default());
             MockLocal {
                 runner: Rc::new(RefCell::new(runner)),
                 remote,
@@ -324,7 +324,7 @@ mod tests {
         local.remote.spawn(TaskCell::new(
             fut,
             local.remote.clone(),
-            Extras::simple_default(),
+            Extras::single_level(),
         ));
 
         local.handle_once();
@@ -389,7 +389,7 @@ mod tests {
         local.remote.spawn(TaskCell::new(
             fut,
             local.remote.clone(),
-            Extras::simple_default(),
+            Extras::single_level(),
         ));
 
         local.handle_once();
@@ -414,7 +414,7 @@ mod tests {
         local.remote.spawn(TaskCell::new(
             fut,
             local.remote.clone(),
-            Extras::simple_default(),
+            Extras::single_level(),
         ));
 
         local.handle_once();
@@ -442,7 +442,7 @@ mod tests {
         local.remote.spawn(TaskCell::new(
             fut,
             local.remote.clone(),
-            Extras::simple_default(),
+            Extras::single_level(),
         ));
 
         local.handle_once();

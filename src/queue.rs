@@ -11,7 +11,7 @@
 pub mod multilevel;
 
 mod extras;
-mod simple;
+mod single_level;
 
 pub use self::extras::Extras;
 
@@ -27,15 +27,15 @@ pub trait TaskCell {
 pub struct TaskInjector<T>(InjectorInner<T>);
 
 enum InjectorInner<T> {
-    Simple(simple::QueueInjector<T>),
-    Multilevel(multilevel::QueueInjector<T>),
+    SingleLevel(single_level::TaskInjector<T>),
+    Multilevel(multilevel::TaskInjector<T>),
 }
 
 impl<T: TaskCell + Send> TaskInjector<T> {
     /// Pushes a task to the queue.
     pub fn push(&self, task_cell: T) {
         match &self.0 {
-            InjectorInner::Simple(q) => q.push(task_cell),
+            InjectorInner::SingleLevel(q) => q.push(task_cell),
             InjectorInner::Multilevel(q) => q.push(task_cell),
         }
     }
@@ -58,15 +58,15 @@ pub struct Pop<T> {
 pub struct LocalQueue<T>(LocalQueueInner<T>);
 
 enum LocalQueueInner<T> {
-    Simple(simple::QueueLocal<T>),
-    Multilevel(multilevel::QueueLocal<T>),
+    SingleLevel(single_level::LocalQueue<T>),
+    Multilevel(multilevel::LocalQueue<T>),
 }
 
 impl<T: TaskCell + Send> LocalQueue<T> {
     /// Pushes a task to the local queue.
     pub fn push(&mut self, task_cell: T) {
         match &mut self.0 {
-            LocalQueueInner::Simple(q) => q.push(task_cell),
+            LocalQueueInner::SingleLevel(q) => q.push(task_cell),
             LocalQueueInner::Multilevel(q) => q.push(task_cell),
         }
     }
@@ -75,20 +75,20 @@ impl<T: TaskCell + Send> LocalQueue<T> {
     /// available.
     pub fn pop(&mut self) -> Option<Pop<T>> {
         match &mut self.0 {
-            LocalQueueInner::Simple(q) => q.pop(),
+            LocalQueueInner::SingleLevel(q) => q.pop(),
             LocalQueueInner::Multilevel(q) => q.pop(),
         }
     }
 }
 
 /// Creates a task queue that allows given number consumers.
-pub fn simple<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
-    let (injector, locals) = simple::create(local_num);
+pub fn single_level<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+    let (injector, locals) = single_level::create(local_num);
     (
-        TaskInjector(InjectorInner::Simple(injector)),
+        TaskInjector(InjectorInner::SingleLevel(injector)),
         locals
             .into_iter()
-            .map(|i| LocalQueue(LocalQueueInner::Simple(i)))
+            .map(|i| LocalQueue(LocalQueueInner::SingleLevel(i)))
             .collect(),
     )
 }

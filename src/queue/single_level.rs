@@ -1,6 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! A simple task queue.
+//! A single level work stealing task queue.
 //!
 //! The instant when the task cell is pushed into the queue is recorded
 //! in the extras.
@@ -13,12 +13,12 @@ use std::iter;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// The injector of a simple task queue.
-pub struct QueueInjector<T>(Arc<Injector<T>>);
+/// The injector of a single level work stealing task queue.
+pub struct TaskInjector<T>(Arc<Injector<T>>);
 
-impl<T: TaskCell> Clone for QueueInjector<T> {
+impl<T: TaskCell> Clone for TaskInjector<T> {
     fn clone(&self) -> Self {
-        QueueInjector(self.0.clone())
+        TaskInjector(self.0.clone())
     }
 }
 
@@ -29,7 +29,7 @@ where
     task_cell.mut_extras().schedule_time = Some(Instant::now());
 }
 
-impl<T> QueueInjector<T>
+impl<T> TaskInjector<T>
 where
     T: TaskCell + Send,
 {
@@ -41,14 +41,14 @@ where
     }
 }
 
-/// The local queue of a simple task queue.
-pub struct QueueLocal<T> {
+/// The local queue of a single level work stealing task queue.
+pub struct LocalQueue<T> {
     local_queue: Worker<T>,
     injector: Arc<Injector<T>>,
     stealers: Vec<Stealer<T>>,
 }
 
-impl<T> QueueLocal<T>
+impl<T> LocalQueue<T>
 where
     T: TaskCell,
 {
@@ -104,8 +104,8 @@ where
     }
 }
 
-/// Creates a simple task queue with `local_num` local queues.
-pub fn create<T>(local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
+/// Creates a single level work stealing task queue with `local_num` local queues.
+pub fn create<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
     let injector = Arc::new(Injector::new());
     let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)
         .take(local_num)
@@ -123,7 +123,7 @@ pub fn create<T>(local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
                 .collect();
             // Steal with a random start to avoid imbalance.
             stealers.shuffle(&mut thread_rng());
-            QueueLocal {
+            LocalQueue {
                 local_queue,
                 injector: injector.clone(),
                 stealers,
@@ -131,7 +131,7 @@ pub fn create<T>(local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
         })
         .collect();
 
-    (QueueInjector(injector), local_queues)
+    (TaskInjector(injector), local_queues)
 }
 
 #[cfg(test)]
@@ -153,7 +153,7 @@ mod tests {
         fn new(value: i32) -> Self {
             MockCell {
                 value,
-                extras: Extras::simple_default(),
+                extras: Extras::single_level(),
             }
         }
     }

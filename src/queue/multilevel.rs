@@ -6,7 +6,7 @@
 //! The task queue requires that the accompanying [`MultilevelRunner`] must be
 //! used to collect necessary information.
 
-use super::{InjectorInner, LocalQueue, LocalQueueInner, Pop, TaskCell, TaskInjector};
+use super::{Pop, TaskCell};
 use crate::pool::{Local, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
@@ -42,12 +42,12 @@ const MAX_LEVEL0_CHANCE: u32 = 4_209_067_949; // 0.98
 const ADJUST_AMOUNT: u32 = (MAX_LEVEL0_CHANCE - MIN_LEVEL0_CHANCE) / 8; // 0.06
 
 /// The injector of a multilevel task queue.
-pub struct QueueInjector<T> {
+pub struct TaskInjector<T> {
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
     manager: Arc<LevelManager>,
 }
 
-impl<T> Clone for QueueInjector<T> {
+impl<T> Clone for TaskInjector<T> {
     fn clone(&self) -> Self {
         Self {
             level_injectors: self.level_injectors.clone(),
@@ -56,7 +56,7 @@ impl<T> Clone for QueueInjector<T> {
     }
 }
 
-impl<T> QueueInjector<T>
+impl<T> TaskInjector<T>
 where
     T: TaskCell + Send,
 {
@@ -68,14 +68,14 @@ where
 }
 
 /// The local queue of a multilevel task queue.
-pub struct QueueLocal<T> {
+pub struct LocalQueue<T> {
     local_queue: Worker<T>,
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
     stealers: Vec<Stealer<T>>,
     manager: Arc<LevelManager>,
 }
 
-impl<T> QueueLocal<T>
+impl<T> LocalQueue<T>
 where
     T: TaskCell,
 {
@@ -459,7 +459,7 @@ impl Builder {
         }
     }
 
-    fn build_raw<T>(self, local_num: usize) -> (QueueInjector<T>, Vec<QueueLocal<T>>) {
+    fn build_raw<T>(self, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
         let level_injectors: Arc<[Injector<T>; LEVEL_NUM]> =
             Arc::new([Injector::new(), Injector::new(), Injector::new()]);
         let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)
@@ -478,7 +478,7 @@ impl Builder {
                     .collect();
                 // Steal with a random start to avoid imbalance.
                 stealers.shuffle(&mut thread_rng());
-                QueueLocal {
+                LocalQueue {
                     local_queue,
                     level_injectors: level_injectors.clone(),
                     stealers,
@@ -488,7 +488,7 @@ impl Builder {
             .collect();
 
         (
-            QueueInjector {
+            TaskInjector {
                 level_injectors,
                 manager: self.manager,
             },
@@ -497,14 +497,14 @@ impl Builder {
     }
 
     /// Creates the injector and local queues of the multilevel task queue.
-    pub fn build<T>(self, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+    pub fn build<T>(self, local_num: usize) -> (super::TaskInjector<T>, Vec<super::LocalQueue<T>>) {
         let (injector, locals) = self.build_raw(local_num);
         let local_queues = locals
             .into_iter()
-            .map(|local| LocalQueue(LocalQueueInner::Multilevel(local)))
+            .map(|local| super::LocalQueue(super::LocalQueueInner::Multilevel(local)))
             .collect();
         (
-            TaskInjector(InjectorInner::Multilevel(injector)),
+            super::TaskInjector(super::InjectorInner::Multilevel(injector)),
             local_queues,
         )
     }
@@ -766,20 +766,9 @@ mod tests {
     fn test_runner_records_handle_time() {
         let builder = Builder::new(Config::default());
         let mut runner_builder = builder.runner_builder(MockRunnerBuilder);
-        let mut injector_clone: Option<QueueInjector<MockTask>> = None;
-        let injector_ref = &mut injector_clone;
+        let manager = builder.manager.clone();
         let (remote, mut locals) = build_spawn(
-            move |local_num| {
-                let (injector, locals) = builder.build_raw(local_num);
-                *injector_ref = Some(injector.clone());
-                (
-                    TaskInjector(InjectorInner::Multilevel(injector)),
-                    locals
-                        .into_iter()
-                        .map(|local| LocalQueue(LocalQueueInner::Multilevel(local)))
-                        .collect(),
-                )
-            },
+            move |local_num| builder.build(local_num),
             Default::default(),
         );
         let mut runner = runner_builder.build();
@@ -788,14 +777,8 @@ mod tests {
         if let Some(Pop { task_cell, .. }) = locals[0].pop() {
             assert!(runner.handle(&mut locals[0], task_cell));
         }
-        let injector = injector_clone.unwrap();
         assert!(
-            injector
-                .manager
-                .task_elapsed_map
-                .get_elapsed(1)
-                .as_duration()
-                >= Duration::from_millis(100)
+            manager.task_elapsed_map.get_elapsed(1).as_duration() >= Duration::from_millis(100)
         );
     }
 
