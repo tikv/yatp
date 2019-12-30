@@ -2,8 +2,9 @@
 
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
-use crate::pool::{Local, Remote, Runner, RunnerBuilder, ThreadPool};
-use crate::queue::{LocalQueue, TaskCell, TaskInjector};
+use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
+use crate::queue::{self, LocalQueue, TaskCell, TaskInjector};
+use crate::task::{callback, future};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -177,13 +178,28 @@ impl Builder {
     /// Freezes the configurations and returns the task scheduler and
     /// a builder to for lazy spawning threads.
     ///
+    /// It internally uses simple queue to setup the pool.
+    ///
+    /// In some cases, especially building up a large application, a task
+    /// scheduler is required before spawning new threads. You can use this
+    /// to separate the construction and starting.
+    pub fn freeze<T>(&self) -> (Remote<T>, LazyBuilder<T>)
+    where
+        T: TaskCell + Send,
+    {
+        self.freeze_with_queue(queue::simple)
+    }
+
+    /// Freezes the configurations and returns the task scheduler and
+    /// a builder to for lazy spawning threads.
+    ///
     /// `queue_builder` is a closure that creates a task queue. It accepts the
     /// number of local queues and returns the task injector and local queues.
     ///
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
     /// to separate the construction and starting.
-    pub fn freeze<T>(
+    pub fn freeze_with_queue<T>(
         &self,
         queue_builder: impl FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
     ) -> (Remote<T>, LazyBuilder<T>)
@@ -204,11 +220,27 @@ impl Builder {
         )
     }
 
+    /// Spawns a callback pool.
+    ///
+    /// It setups the pool with simple queue.
+    pub fn build_callback_pool(&self) -> ThreadPool<callback::TaskCell> {
+        let rb = CloneRunnerBuilder(callback::Runner::default());
+        self.build_with_queue_and_runner(queue::simple, rb)
+    }
+
+    /// Spawns a future pool.
+    ///
+    /// It setups the pool with simple queue.
+    pub fn build_future_pool<T, B>(&self) -> ThreadPool<future::TaskCell> {
+        let fb = CloneRunnerBuilder(future::Runner::default());
+        self.build_with_queue_and_runner(queue::simple, fb)
+    }
+
     /// Spawns the thread pool immediately.
     ///
     /// `queue_builder` is a closure that creates a task queue. It accepts the
     /// number of local queues and returns the task injector and local queues.
-    pub fn build<T, B>(
+    pub fn build_with_queue_and_runner<T, B>(
         &self,
         queue_builder: impl FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
         runner_builder: B,
@@ -218,6 +250,8 @@ impl Builder {
         B: RunnerBuilder,
         B::Runner: Runner<TaskCell = T> + Send + 'static,
     {
-        self.freeze(queue_builder).1.build(runner_builder)
+        self.freeze_with_queue(queue_builder)
+            .1
+            .build(runner_builder)
     }
 }
