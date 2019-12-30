@@ -11,7 +11,7 @@
 pub mod multilevel;
 
 mod extras;
-mod work_stealing;
+mod single_level;
 
 pub use self::extras::Extras;
 
@@ -27,7 +27,7 @@ pub trait TaskCell {
 pub struct TaskInjector<T>(InjectorInner<T>);
 
 enum InjectorInner<T> {
-    WorkStealing(work_stealing::TaskInjector<T>),
+    WorkStealing(single_level::TaskInjector<T>),
     Multilevel(multilevel::TaskInjector<T>),
 }
 
@@ -58,7 +58,7 @@ pub struct Pop<T> {
 pub struct LocalQueue<T>(LocalQueueInner<T>);
 
 enum LocalQueueInner<T> {
-    WorkStealing(work_stealing::LocalQueue<T>),
+    WorkStealing(single_level::LocalQueue<T>),
     Multilevel(multilevel::LocalQueue<T>),
 }
 
@@ -82,8 +82,8 @@ impl<T: TaskCell + Send> LocalQueue<T> {
 }
 
 /// Creates a task queue that allows given number consumers.
-pub fn work_stealing<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
-    let (injector, locals) = work_stealing::create(local_num);
+pub fn single_level<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+    let (injector, locals) = single_level::create(local_num);
     (
         TaskInjector(InjectorInner::WorkStealing(injector)),
         locals

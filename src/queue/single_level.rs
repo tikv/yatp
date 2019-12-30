@@ -153,7 +153,7 @@ mod tests {
         fn new(value: i32) -> Self {
             MockCell {
                 value,
-                extras: Extras::work_stealing(),
+                extras: Extras::single_level(),
             }
         }
     }
