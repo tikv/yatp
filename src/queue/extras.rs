@@ -25,9 +25,9 @@ pub struct Extras {
 }
 
 impl Extras {
-    /// Creates a default `Extras` for task cells pushed into a simple task
-    /// queue.
-    pub fn simple_default() -> Extras {
+    /// Creates a default `Extras` for task cells pushed into a work stealing
+    /// task queue.
+    pub fn work_stealing() -> Extras {
         Extras {
             schedule_time: None,
             task_id: 0,

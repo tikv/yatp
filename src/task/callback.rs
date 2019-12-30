@@ -46,7 +46,7 @@ where
     fn from(f: F) -> TaskCell {
         TaskCell {
             task: Task::new_once(f),
-            extras: Extras::simple_default(),
+            extras: Extras::work_stealing(),
         }
     }
 }
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_once() {
-        let (_, mut locals) = build_spawn(queue::simple, Default::default());
+        let (_, mut locals) = build_spawn(queue::work_stealing, Default::default());
         let mut runner = Runner::default();
         let (tx, rx) = mpsc::channel();
         runner.handle(
@@ -171,7 +171,7 @@ mod tests {
                 task: Task::new_once(move |_| {
                     tx.send(42).unwrap();
                 }),
-                extras: Extras::simple_default(),
+                extras: Extras::work_stealing(),
             },
         );
         assert_eq!(rx.recv().unwrap(), 42);
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_mut_no_respawn() {
-        let (_, mut locals) = build_spawn(queue::simple, Default::default());
+        let (_, mut locals) = build_spawn(queue::work_stealing, Default::default());
         let mut runner = Runner::new(1);
         let (tx, rx) = mpsc::channel();
 
@@ -194,7 +194,7 @@ mod tests {
                         handle.set_rerun(true);
                     }
                 }),
-                extras: Extras::simple_default(),
+                extras: Extras::work_stealing(),
             },
         );
         assert_eq!(rx.recv().unwrap(), 42);
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_mut_respawn() {
-        let (_, mut locals) = build_spawn(queue::simple, Default::default());
+        let (_, mut locals) = build_spawn(queue::work_stealing, Default::default());
         let mut runner = Runner::new(1);
         let (tx, rx) = mpsc::channel();
 
@@ -220,7 +220,7 @@ mod tests {
                         handle.set_rerun(true);
                     }
                 }),
-                extras: Extras::simple_default(),
+                extras: Extras::work_stealing(),
             },
         );
         assert_eq!(rx.recv().unwrap(), 42);

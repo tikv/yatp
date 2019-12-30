@@ -13,7 +13,7 @@ fn test_basic() {
     let r = Runner::new(3);
     let mut builder = Builder::new("test_basic");
     builder.max_thread_count(4);
-    let pool = builder.build(queue::simple, CloneRunnerBuilder(r));
+    let pool = builder.build(queue::work_stealing, CloneRunnerBuilder(r));
     let (tx, rx) = mpsc::channel();
 
     // Task should be executed immediately.
@@ -84,7 +84,7 @@ fn test_remote() {
     let r = Runner::new(3);
     let mut builder = Builder::new("test_remote");
     builder.max_thread_count(4);
-    let pool = builder.build(queue::simple, CloneRunnerBuilder(r));
+    let pool = builder.build(queue::work_stealing, CloneRunnerBuilder(r));
 
     // Remote should work just like pool.
     let remote = pool.remote();
