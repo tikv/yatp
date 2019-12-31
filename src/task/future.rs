@@ -87,6 +87,15 @@ unsafe fn waker(task: *const Task) -> Waker {
 #[inline]
 unsafe fn clone_raw(this: *const ()) -> RawWaker {
     let task_cell = clone_task(this as *const Task);
+    let extras = { &mut *task_cell.0.extras.get() };
+    if extras.remote.is_none() {
+        // `Future` guarantees that waker has to be cloned before getting out
+        // of the thread pool scope. And `Runner` guarantees `LOCAL` is
+        // initialized whenever the future is polled in the scope.
+        LOCAL.with(|l| {
+            extras.remote = Some((&*l.get()).remote());
+        })
+    }
     RawWaker::new(
         Arc::into_raw(task_cell.0) as *const (),
         &RawWakerVTable::new(clone_raw, wake_raw, wake_ref_raw, drop_raw),
@@ -149,14 +158,6 @@ unsafe fn task_cell(task: *const Task) -> TaskCell {
 #[inline]
 unsafe fn clone_task(task: *const Task) -> TaskCell {
     let task_cell = task_cell(task);
-    let extras = { &mut *task_cell.0.extras.get() };
-    // `remote` is none only when it has been constructed but never been polled.
-    if extras.remote.is_none() {
-        // So `clone_task` has to be called from `poll`, `LOCAL` can't be NULL.
-        LOCAL.with(|l| {
-            extras.remote = Some((&*l.get()).remote());
-        })
-    }
     mem::forget(task_cell.0.clone());
     task_cell
 }
