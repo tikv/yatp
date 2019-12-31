@@ -3,7 +3,7 @@
 //! A [`FnOnce`] or [`FnMut`] closure.
 
 use crate::pool::Local;
-use crate::queue::Extras;
+use crate::queue::{Extras, WithExtras};
 
 /// A callback task, which is either a [`FnOnce`] or a [`FnMut`].
 pub enum Task {
@@ -39,14 +39,14 @@ impl crate::queue::TaskCell for TaskCell {
     }
 }
 
-impl<F> From<F> for TaskCell
+impl<F> WithExtras<TaskCell> for F 
 where
     F: FnOnce(&mut Handle<'_>) + Send + 'static,
 {
-    fn from(f: F) -> TaskCell {
+    fn with_extras(self, extras: impl FnOnce() -> Extras) -> TaskCell {
         TaskCell {
-            task: Task::new_once(f),
-            extras: Extras::single_level(),
+            task: Task::new_once(self),
+            extras: extras(),
         }
     }
 }

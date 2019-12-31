@@ -14,7 +14,7 @@ pub use self::builder::{Builder, SchedConfig};
 pub use self::runner::{CloneRunnerBuilder, Runner, RunnerBuilder};
 pub use self::spawn::{build_spawn, Local, Remote};
 
-use crate::queue::TaskCell;
+use crate::queue::{TaskCell, WithExtras};
 use std::mem;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
@@ -29,7 +29,7 @@ impl<T: TaskCell + Send> ThreadPool<T> {
     /// Spawns the task into the thread pool.
     ///
     /// If the pool is shutdown, it becomes no-op.
-    pub fn spawn(&self, t: impl Into<T>) {
+    pub fn spawn(&self, t: impl WithExtras<T>) {
         self.remote.spawn(t);
     }
 

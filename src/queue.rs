@@ -23,6 +23,19 @@ pub trait TaskCell {
     fn mut_extras(&mut self) -> &mut Extras;
 }
 
+/// A convenient trait that support construct a TaskCell with
+/// given extras.
+pub trait WithExtras<T> {
+    /// Return a TaskCell with the given extras.
+    fn with_extras(self, extras: impl FnOnce() -> Extras) -> T;
+}
+
+impl<F: TaskCell> WithExtras<F> for F {
+    fn with_extras(self, _: impl FnOnce() -> Extras) -> F {
+        self
+    }
+}
+
 /// The injector of a task queue.
 pub struct TaskInjector<T>(InjectorInner<T>);
 
@@ -37,6 +50,13 @@ impl<T: TaskCell + Send> TaskInjector<T> {
         match &self.0 {
             InjectorInner::SingleLevel(q) => q.push(task_cell),
             InjectorInner::Multilevel(q) => q.push(task_cell),
+        }
+    }
+
+    pub fn default_extras(&self) -> Extras {
+        match self.0 {
+            InjectorInner::SingleLevel(_) => Extras::single_level(),
+            InjectorInner::Multilevel(_) => Extras::multilevel_default(),
         }
     }
 }
@@ -77,6 +97,13 @@ impl<T: TaskCell + Send> LocalQueue<T> {
         match &mut self.0 {
             LocalQueueInner::SingleLevel(q) => q.pop(),
             LocalQueueInner::Multilevel(q) => q.pop(),
+        }
+    }
+
+    pub fn default_extras(&self) -> Extras {
+        match self.0 {
+            LocalQueueInner::SingleLevel(_) => Extras::single_level(),
+            LocalQueueInner::Multilevel(_) => Extras::multilevel_default(),
         }
     }
 }
