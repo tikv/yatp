@@ -90,11 +90,19 @@ unsafe fn clone_raw(this: *const ()) -> RawWaker {
     let task_cell = clone_task(this as *const Task);
     let extras = { &mut *task_cell.0.extras.get() };
     if extras.remote.is_none() {
-        // `Future` guarantees that waker has to be cloned before getting out
-        // of the thread pool scope. And `Runner` guarantees `LOCAL` is
-        // initialized whenever the future is polled in the scope.
         LOCAL.with(|l| {
-            extras.remote = Some((&*l.get()).remote());
+            // In general cases, waker will be cloned before getting out of the
+            // thread pool scope. And `Runner` guarantees `LOCAL` is
+            // initialized whenever the future is polled in the scope.
+            if !l.get().is_null() {
+                extras.remote = Some((&*l.get()).remote());
+            } else {
+                // NOTE: Due to rust-lang/rust#66481, it's possible that
+                // context is shared between threads by reference, but it is
+                // such a tricky situation that let's not support it to make
+                // code clean.
+                panic!("waker should not be moved to other threads by reference");
+            }
         })
     }
     RawWaker::new(
@@ -178,7 +186,7 @@ unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
             (*task.as_ref().extras.get())
                 .remote
                 .as_ref()
-                .unwrap()
+                .expect("waker should not be moved to other threads by reference")
                 .spawn(TaskCell(task.clone().into_owned()));
         } else if reschedule {
             // It's requested explicitly to schedule to global queue.
