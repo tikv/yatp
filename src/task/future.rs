@@ -483,29 +483,10 @@ mod tests {
         assert_eq!(res_rx.recv().unwrap(), 4);
     }
 
-    struct ForwardWaker {
-        first_poll: bool,
-        tx: mpsc::Sender<Waker>,
-    }
-
-    impl Future for ForwardWaker {
-        type Output = ();
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            if self.first_poll {
-                self.first_poll = false;
-                self.tx.send(cx.waker().clone()).unwrap();
-                Poll::Pending
-            } else {
-                Poll::Ready(())
-            }
-        }
-    }
-
     #[test]
     fn test_reschedule() {
         let mut local = MockLocal::default();
         let (res_tx, res_rx) = mpsc::channel();
-        let (waker_tx, waker_rx) = mpsc::channel();
 
         let fut = async move {
             res_tx.send(1).unwrap();
@@ -513,12 +494,6 @@ mod tests {
             res_tx.send(2).unwrap();
             PendingOnce::new().await;
             res_tx.send(3).unwrap();
-            ForwardWaker {
-                first_poll: true,
-                tx: waker_tx,
-            }
-            .await;
-            res_tx.send(4).unwrap();
         };
         local
             .remote
@@ -530,15 +505,5 @@ mod tests {
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 2);
         assert_eq!(res_rx.recv().unwrap(), 3);
-        assert!(res_rx.try_recv().is_err());
-
-        // `ForwardWaker` has not been notified yet, `handle_once` should
-        // handle nothing.
-        local.handle_once();
-        assert!(res_rx.try_recv().is_err());
-        let waker = waker_rx.try_recv().unwrap();
-        waker.wake();
-        local.handle_once();
-        assert_eq!(res_rx.try_recv().unwrap(), 4);
     }
 }
