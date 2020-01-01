@@ -88,23 +88,6 @@ unsafe fn waker(task: *const Task) -> Waker {
 #[inline]
 unsafe fn clone_raw(this: *const ()) -> RawWaker {
     let task_cell = clone_task(this as *const Task);
-    let extras = { &mut *task_cell.0.extras.get() };
-    if extras.remote.is_none() {
-        LOCAL.with(|l| {
-            // In general cases, waker will be cloned before getting out of the
-            // thread pool scope. And `Runner` guarantees `LOCAL` is
-            // initialized whenever the future is polled in the scope.
-            if !l.get().is_null() {
-                extras.remote = Some((&*l.get()).remote());
-            } else {
-                // NOTE: Due to rust-lang/rust#66481, it's possible that
-                // context is shared between threads by reference, but it is
-                // such a tricky situation that let's not support it to make
-                // code clean.
-                panic!("waker should not be moved to other threads by reference");
-            }
-        })
-    }
     RawWaker::new(
         Arc::into_raw(task_cell.0) as *const (),
         &RawWakerVTable::new(clone_raw, wake_raw, wake_ref_raw, drop_raw),
@@ -186,7 +169,7 @@ unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
             (*task.as_ref().extras.get())
                 .remote
                 .as_ref()
-                .expect("waker should not be moved to other threads by reference")
+                .expect("remote should exist!!!")
                 .spawn(TaskCell(task.clone().into_owned()));
         } else if reschedule {
             // It's requested explicitly to schedule to global queue.
@@ -256,6 +239,15 @@ impl crate::pool::Runner for Runner {
                 if let Poll::Ready(_) = (&mut *task.future.get()).as_mut().poll(&mut cx) {
                     task.status.store(COMPLETED, SeqCst);
                     return true;
+                }
+                let extras = { &mut *task.extras.get() };
+                if extras.remote.is_none() {
+                    // It's possible to avoid assigning remote in some cases, but it requires
+                    // at least one atomic load to detect such situation. So here just assign
+                    // it to make things simple.
+                    LOCAL.with(|l| {
+                        extras.remote = Some((&*l.get()).remote());
+                    })
                 }
                 match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
                     Ok(_) => return false,
