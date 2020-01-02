@@ -108,8 +108,37 @@ impl<T: TaskCell + Send> LocalQueue<T> {
     }
 }
 
+/// Supported available queues.
+pub enum QueueType {
+    /// A single level work stealing queue.
+    SingleLevel,
+    /// A multilevel feedback queue.
+    ///
+    /// More to see: https://en.wikipedia.org/wiki/Multilevel_feedback_queue.
+    Multilevel(multilevel::Builder),
+}
+
+impl Default for QueueType {
+    fn default() -> QueueType {
+        QueueType::SingleLevel
+    }
+}
+
+impl From<multilevel::Builder> for QueueType {
+    fn from(b: multilevel::Builder) -> QueueType {
+        QueueType::Multilevel(b)
+    }
+}
+
+pub(crate) fn build<T>(ty: QueueType, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+    match ty {
+        QueueType::SingleLevel => single_level(local_num),
+        QueueType::Multilevel(b) => b.build(local_num),
+    }
+}
+
 /// Creates a task queue that allows given number consumers.
-pub(crate) fn single_level<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+fn single_level<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
     let (injector, locals) = single_level::create(local_num);
     (
         TaskInjector(InjectorInner::SingleLevel(injector)),

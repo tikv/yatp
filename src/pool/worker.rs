@@ -55,6 +55,7 @@ where
 mod tests {
     use super::*;
     use crate::pool::spawn::*;
+    use crate::queue::QueueType;
     use crate::task::callback;
     use std::sync::*;
     use std::time::*;
@@ -120,7 +121,7 @@ mod tests {
         };
         let metrics = r.metrics.clone();
         let mut expected_metrics = Metrics::default();
-        let (injector, mut locals) = build_spawn(None, Default::default());
+        let (injector, mut locals) = build_spawn(QueueType::SingleLevel, Default::default());
         let th = WorkerThread::new(locals.remove(0), r);
         let handle = std::thread::spawn(move || {
             th.run();

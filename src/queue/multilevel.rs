@@ -770,7 +770,7 @@ mod tests {
         let builder = Builder::new(Config::default());
         let mut runner_builder = builder.runner_builder(MockRunnerBuilder);
         let manager = builder.manager.clone();
-        let (remote, mut locals) = build_spawn(Some(builder), Default::default());
+        let (remote, mut locals) = build_spawn(builder, Default::default());
         let mut runner = runner_builder.build();
 
         remote.spawn(MockTask::new(100, Extras::new_multilevel(1, None)));

@@ -3,7 +3,7 @@
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
 use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
-use crate::queue::{self, multilevel, LocalQueue, TaskCell};
+use crate::queue::{self, LocalQueue, QueueType, TaskCell};
 use crate::task::{callback, future};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -178,21 +178,33 @@ impl Builder {
     /// Freezes the configurations and returns the task scheduler and
     /// a builder to for lazy spawning threads.
     ///
-    /// If `None` is supplied, it uses single level queue to setup the pool.
+    /// It internally uses single level queue to setup the pool.
     ///
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
     /// to separate the construction and starting.
-    pub fn freeze<T>(&self, multilevel: Option<multilevel::Builder>) -> (Remote<T>, LazyBuilder<T>)
+    pub fn freeze<T>(&self) -> (Remote<T>, LazyBuilder<T>)
+    where
+        T: TaskCell + Send,
+    {
+        self.freeze_with_queue(QueueType::SingleLevel)
+    }
+
+    /// Freezes the configurations and returns the task scheduler and
+    /// a builder to for lazy spawning threads.
+    ///
+    /// `queue_builder` is a closure that creates a task queue. It accepts the
+    /// number of local queues and returns the task injector and local queues.
+    ///
+    /// In some cases, especially building up a large application, a task
+    /// scheduler is required before spawning new threads. You can use this
+    /// to separate the construction and starting.
+    pub fn freeze_with_queue<T>(&self, queue_type: QueueType) -> (Remote<T>, LazyBuilder<T>)
     where
         T: TaskCell + Send,
     {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
-        let (injector, local_queues) = if let Some(builder) = multilevel {
-            builder.build(self.sched_config.max_thread_count)
-        } else {
-            queue::single_level(self.sched_config.max_thread_count)
-        };
+        let (injector, local_queues) = queue::build(queue_type, self.sched_config.max_thread_count);
         let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));
 
         (
@@ -210,7 +222,7 @@ impl Builder {
     /// It setups the pool with single level queue.
     pub fn build_callback_pool(&self) -> ThreadPool<callback::TaskCell> {
         let rb = CloneRunnerBuilder(callback::Runner::default());
-        self.build_with_queue_and_runner(None, rb)
+        self.build_with_queue_and_runner(QueueType::SingleLevel, rb)
     }
 
     /// Spawns a future pool.
@@ -218,7 +230,7 @@ impl Builder {
     /// It setups the pool with single level queue.
     pub fn build_future_pool<T, B>(&self) -> ThreadPool<future::TaskCell> {
         let fb = CloneRunnerBuilder(future::Runner::default());
-        self.build_with_queue_and_runner(None, fb)
+        self.build_with_queue_and_runner(QueueType::SingleLevel, fb)
     }
 
     /// Spawns the thread pool immediately.
@@ -227,7 +239,7 @@ impl Builder {
     /// number of local queues and returns the task injector and local queues.
     pub fn build_with_queue_and_runner<T, B>(
         &self,
-        multilevel: Option<multilevel::Builder>,
+        queue_type: QueueType,
         runner_builder: B,
     ) -> ThreadPool<T>
     where
@@ -235,6 +247,6 @@ impl Builder {
         B: RunnerBuilder,
         B::Runner: Runner<TaskCell = T> + Send + 'static,
     {
-        self.freeze(multilevel).1.build(runner_builder)
+        self.freeze_with_queue(queue_type).1.build(runner_builder)
     }
 }
