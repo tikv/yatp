@@ -5,6 +5,7 @@
 use crate::pool::{Local, Remote};
 use crate::queue::{Extras, WithExtras};
 
+use std::borrow::Cow;
 use std::cell::{Cell, UnsafeCell};
 use std::future::Future;
 use std::mem::ManuallyDrop;
@@ -107,13 +108,13 @@ unsafe fn drop_raw(this: *const ()) {
     drop(task_cell(this as *const Task))
 }
 
-unsafe fn wake_impl(task_cell: &TaskCell) {
-    let task = &task_cell.0;
-    let mut status = task.status.load(SeqCst);
+unsafe fn wake_impl(task: Cow<'_, Arc<Task>>) {
+    let mut status = task.as_ref().status.load(SeqCst);
     loop {
         match status {
             IDLE => {
                 match task
+                    .as_ref()
                     .status
                     .compare_exchange_weak(IDLE, NOTIFIED, SeqCst, SeqCst)
                 {
@@ -126,6 +127,7 @@ unsafe fn wake_impl(task_cell: &TaskCell) {
             }
             POLLING => {
                 match task
+                    .as_ref()
                     .status
                     .compare_exchange_weak(POLLING, NOTIFIED, SeqCst, SeqCst)
                 {
@@ -141,13 +143,13 @@ unsafe fn wake_impl(task_cell: &TaskCell) {
 #[inline]
 unsafe fn wake_raw(this: *const ()) {
     let task_cell = task_cell(this as *const Task);
-    wake_impl(&task_cell);
+    wake_impl(Cow::Owned(task_cell.0));
 }
 
 #[inline]
 unsafe fn wake_ref_raw(this: *const ()) {
     let task_cell = ManuallyDrop::new(task_cell(this as *const Task));
-    wake_impl(&task_cell);
+    wake_impl(Cow::Borrowed(&task_cell.0));
 }
 
 #[inline]
@@ -169,21 +171,27 @@ unsafe fn clone_task(task: *const Task) -> TaskCell {
 }
 
 thread_local! {
+    /// Local queue reference that is set before polling and unset after polled.
     static LOCAL: Cell<*mut Local<TaskCell>> = Cell::new(std::ptr::null_mut());
 }
 
-unsafe fn wake_task(task: &Arc<Task>, reschedule: bool) {
+unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
     LOCAL.with(|ptr| {
         if ptr.get().is_null() {
-            (&mut *task.extras.get())
+            // It's out of polling process, has to be spawn to global queue.
+            // It needs to clone to make it safe as it's unclear whether `self`
+            // is still used inside method `spawn` after `TaskCell` is dropped.
+            (*task.as_ref().extras.get())
                 .remote
                 .as_ref()
-                .unwrap()
-                .spawn(clone_task(&**task));
+                .expect("remote should exist!!!")
+                .spawn(TaskCell(task.clone().into_owned()));
         } else if reschedule {
-            (&mut *ptr.get()).spawn_remote(clone_task(&**task));
+            // It's requested explicitly to schedule to global queue.
+            (*ptr.get()).spawn_remote(TaskCell(task.into_owned()));
         } else {
-            (&mut *ptr.get()).spawn(clone_task(&**task));
+            // Otherwise spawns to local queue for best locality.
+            (*ptr.get()).spawn(TaskCell(task.into_owned()));
         }
     })
 }
@@ -247,12 +255,21 @@ impl crate::pool::Runner for Runner {
                     task.status.store(COMPLETED, SeqCst);
                     return true;
                 }
+                let extras = { &mut *task.extras.get() };
+                if extras.remote.is_none() {
+                    // It's possible to avoid assigning remote in some cases, but it requires
+                    // at least one atomic load to detect such situation. So here just assign
+                    // it to make things simple.
+                    LOCAL.with(|l| {
+                        extras.remote = Some((&*l.get()).remote());
+                    })
+                }
                 match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
                     Ok(_) => return false,
                     Err(NOTIFIED) => {
                         let need_reschedule = NEED_RESCHEDULE.with(|r| r.replace(false));
                         if repoll_times >= self.repoll_limit || need_reschedule {
-                            wake_task(&task, need_reschedule);
+                            wake_task(Cow::Owned(task), need_reschedule);
                             return false;
                         } else {
                             repoll_times += 1;
