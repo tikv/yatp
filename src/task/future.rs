@@ -389,9 +389,7 @@ mod tests {
             WakeLater::new(waker_tx.clone()).await;
             res_tx.send(2).unwrap();
         };
-        local
-            .remote
-            .spawn(TaskCell::new(fut, Extras::single_level()));
+        local.remote.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -452,9 +450,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(2).unwrap();
         };
-        local
-            .remote
-            .spawn(TaskCell::new(fut, Extras::single_level()));
+        local.remote.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -475,9 +471,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(4).unwrap();
         };
-        local
-            .remote
-            .spawn(TaskCell::new(fut, Extras::single_level()));
+        local.remote.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -501,9 +495,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(3).unwrap();
         };
-        local
-            .remote
-            .spawn(TaskCell::new(fut, Extras::single_level()));
+        local.remote.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
