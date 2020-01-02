@@ -37,7 +37,7 @@ impl<F: TaskCell> WithExtras<F> for F {
 }
 
 /// The injector of a task queue.
-pub struct TaskInjector<T>(InjectorInner<T>);
+pub(crate) struct TaskInjector<T>(InjectorInner<T>);
 
 enum InjectorInner<T> {
     SingleLevel(single_level::TaskInjector<T>),
@@ -75,7 +75,7 @@ pub struct Pop<T> {
 }
 
 /// The local queue of a task queue.
-pub struct LocalQueue<T>(LocalQueueInner<T>);
+pub(crate) struct LocalQueue<T>(LocalQueueInner<T>);
 
 enum LocalQueueInner<T> {
     SingleLevel(single_level::LocalQueue<T>),
@@ -109,7 +109,7 @@ impl<T: TaskCell + Send> LocalQueue<T> {
 }
 
 /// Creates a task queue that allows given number consumers.
-pub fn single_level<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+pub(crate) fn single_level<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
     let (injector, locals) = single_level::create(local_num);
     (
         TaskInjector(InjectorInner::SingleLevel(injector)),

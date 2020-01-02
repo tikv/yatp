@@ -157,12 +157,11 @@ impl crate::pool::Runner for Runner {
 mod tests {
     use super::*;
     use crate::pool::{build_spawn, Runner as _};
-    use crate::queue;
     use std::sync::mpsc;
 
     #[test]
     fn test_once() {
-        let (_, mut locals) = build_spawn(queue::single_level, Default::default());
+        let (_, mut locals) = build_spawn(None, Default::default());
         let mut runner = Runner::default();
         let (tx, rx) = mpsc::channel();
         runner.handle(
@@ -179,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_mut_no_respawn() {
-        let (_, mut locals) = build_spawn(queue::single_level, Default::default());
+        let (_, mut locals) = build_spawn(None, Default::default());
         let mut runner = Runner::new(1);
         let (tx, rx) = mpsc::channel();
 
@@ -205,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_mut_respawn() {
-        let (_, mut locals) = build_spawn(queue::single_level, Default::default());
+        let (_, mut locals) = build_spawn(None, Default::default());
         let mut runner = Runner::new(1);
         let (tx, rx) = mpsc::channel();
 

@@ -259,12 +259,18 @@ impl<T: TaskCell + Send> Local<T> {
 ///
 /// This is only for tests purpose so that a thread pool doesn't have to be
 /// spawned to test a Runner.
-pub fn build_spawn<F, T>(f: F, config: SchedConfig) -> (Remote<T>, Vec<Local<T>>)
+pub fn build_spawn<T>(
+    builder: Option<crate::queue::multilevel::Builder>,
+    config: SchedConfig,
+) -> (Remote<T>, Vec<Local<T>>)
 where
-    F: FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
     T: TaskCell + Send,
 {
-    let (global, locals) = f(config.max_thread_count);
+    let (global, locals) = if let Some(builder) = builder {
+        builder.build(config.max_thread_count)
+    } else {
+        crate::queue::single_level(config.max_thread_count)
+    };
     let core = Arc::new(QueueCore::new(global, config));
     let l = locals
         .into_iter()

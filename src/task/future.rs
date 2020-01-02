@@ -314,7 +314,6 @@ impl Future for Reschedule {
 mod tests {
     use super::*;
     use crate::pool::{build_spawn, Runner as _};
-    use crate::queue;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -328,7 +327,7 @@ mod tests {
 
     impl MockLocal {
         fn new(runner: Runner) -> MockLocal {
-            let (remote, locals) = build_spawn(queue::single_level, Default::default());
+            let (remote, locals) = build_spawn(None, Default::default());
             MockLocal {
                 runner: Rc::new(RefCell::new(runner)),
                 remote,
