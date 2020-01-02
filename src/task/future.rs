@@ -45,7 +45,8 @@ impl fmt::Debug for TaskCell {
 }
 
 impl<F> WithExtras<TaskCell> for F
-where F: Future<Output=()> + Send + 'static
+where
+    F: Future<Output = ()> + Send + 'static,
 {
     fn with_extras(self, extras: impl FnOnce() -> Extras) -> TaskCell {
         TaskCell::new(self, extras())
@@ -66,10 +67,7 @@ const COMPLETED: u8 = 4;
 
 impl TaskCell {
     /// Creates a [`Future`] task cell that is ready to be polled.
-    pub fn new<F: Future<Output = ()> + Send + 'static>(
-        future: F,
-        extras: Extras,
-    ) -> Self {
+    pub fn new<F: Future<Output = ()> + Send + 'static>(future: F, extras: Extras) -> Self {
         TaskCell(Arc::new(Task {
             status: AtomicU8::new(NOTIFIED),
             future: UnsafeCell::new(Box::pin(future)),
@@ -160,7 +158,7 @@ unsafe fn task_cell(task: *const Task) -> TaskCell {
 #[inline]
 unsafe fn clone_task(task: *const Task) -> TaskCell {
     let task_cell = task_cell(task);
-    let extras = {&mut *task_cell.0.extras.get()};
+    let extras = { &mut *task_cell.0.extras.get() };
     if extras.remote.is_none() {
         LOCAL.with(|l| {
             extras.remote = Some((&*l.get()).remote());
@@ -177,7 +175,11 @@ thread_local! {
 unsafe fn wake_task(task: &Arc<Task>, reschedule: bool) {
     LOCAL.with(|ptr| {
         if ptr.get().is_null() {
-            (&mut *task.extras.get()).remote.as_ref().unwrap().spawn(clone_task(&**task));
+            (&mut *task.extras.get())
+                .remote
+                .as_ref()
+                .unwrap()
+                .spawn(clone_task(&**task));
         } else if reschedule {
             (&mut *ptr.get()).spawn_remote(clone_task(&**task));
         } else {
@@ -249,9 +251,7 @@ impl crate::pool::Runner for Runner {
                     Ok(_) => return false,
                     Err(NOTIFIED) => {
                         let need_reschedule = NEED_RESCHEDULE.with(|r| r.replace(false));
-                        if repoll_times >= self.repoll_limit
-                            || need_reschedule
-                        {
+                        if repoll_times >= self.repoll_limit || need_reschedule {
                             wake_task(&task, need_reschedule);
                             return false;
                         } else {
@@ -373,10 +373,9 @@ mod tests {
             WakeLater::new(waker_tx.clone()).await;
             res_tx.send(2).unwrap();
         };
-        local.remote.spawn(TaskCell::new(
-            fut,
-            Extras::single_level(),
-        ));
+        local
+            .remote
+            .spawn(TaskCell::new(fut, Extras::single_level()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -437,10 +436,9 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(2).unwrap();
         };
-        local.remote.spawn(TaskCell::new(
-            fut,
-            Extras::single_level(),
-        ));
+        local
+            .remote
+            .spawn(TaskCell::new(fut, Extras::single_level()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -461,10 +459,9 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(4).unwrap();
         };
-        local.remote.spawn(TaskCell::new(
-            fut,
-            Extras::single_level(),
-        ));
+        local
+            .remote
+            .spawn(TaskCell::new(fut, Extras::single_level()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -488,10 +485,9 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(3).unwrap();
         };
-        local.remote.spawn(TaskCell::new(
-            fut,
-            Extras::single_level(),
-        ));
+        local
+            .remote
+            .spawn(TaskCell::new(fut, Extras::single_level()));
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);

@@ -5,7 +5,7 @@
 //! tasks waiting to be handled.
 
 use crate::pool::SchedConfig;
-use crate::queue::{LocalQueue, Pop, TaskCell, WithExtras, Extras, TaskInjector};
+use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

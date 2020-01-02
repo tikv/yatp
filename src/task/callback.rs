@@ -39,7 +39,7 @@ impl crate::queue::TaskCell for TaskCell {
     }
 }
 
-impl<F> WithExtras<TaskCell> for F 
+impl<F> WithExtras<TaskCell> for F
 where
     F: FnOnce(&mut Handle<'_>) + Send + 'static,
 {
