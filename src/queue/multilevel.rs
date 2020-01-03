@@ -42,7 +42,7 @@ const MAX_LEVEL0_CHANCE: u32 = 4_209_067_949; // 0.98
 const ADJUST_AMOUNT: u32 = (MAX_LEVEL0_CHANCE - MIN_LEVEL0_CHANCE) / 8; // 0.06
 
 /// The injector of a multilevel task queue.
-pub struct TaskInjector<T> {
+pub(crate) struct TaskInjector<T> {
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
     manager: Arc<LevelManager>,
 }
@@ -68,7 +68,7 @@ where
 }
 
 /// The local queue of a multilevel task queue.
-pub struct LocalQueue<T> {
+pub(crate) struct LocalQueue<T> {
     local_queue: Worker<T>,
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
     stealers: Vec<Stealer<T>>,
@@ -497,7 +497,10 @@ impl Builder {
     }
 
     /// Creates the injector and local queues of the multilevel task queue.
-    pub fn build<T>(self, local_num: usize) -> (super::TaskInjector<T>, Vec<super::LocalQueue<T>>) {
+    pub(crate) fn build<T>(
+        self,
+        local_num: usize,
+    ) -> (super::TaskInjector<T>, Vec<super::LocalQueue<T>>) {
         let (injector, locals) = self.build_raw(local_num);
         let local_queues = locals
             .into_iter()
@@ -767,10 +770,7 @@ mod tests {
         let builder = Builder::new(Config::default());
         let mut runner_builder = builder.runner_builder(MockRunnerBuilder);
         let manager = builder.manager.clone();
-        let (remote, mut locals) = build_spawn(
-            move |local_num| builder.build(local_num),
-            Default::default(),
-        );
+        let (remote, mut locals) = build_spawn(builder, Default::default());
         let mut runner = runner_builder.build();
 
         remote.spawn(MockTask::new(100, Extras::new_multilevel(1, None)));

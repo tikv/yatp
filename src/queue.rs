@@ -23,8 +23,21 @@ pub trait TaskCell {
     fn mut_extras(&mut self) -> &mut Extras;
 }
 
+/// A convenient trait that support construct a TaskCell with
+/// given extras.
+pub trait WithExtras<T> {
+    /// Return a TaskCell with the given extras.
+    fn with_extras(self, extras: impl FnOnce() -> Extras) -> T;
+}
+
+impl<F: TaskCell> WithExtras<F> for F {
+    fn with_extras(self, _: impl FnOnce() -> Extras) -> F {
+        self
+    }
+}
+
 /// The injector of a task queue.
-pub struct TaskInjector<T>(InjectorInner<T>);
+pub(crate) struct TaskInjector<T>(InjectorInner<T>);
 
 enum InjectorInner<T> {
     SingleLevel(single_level::TaskInjector<T>),
@@ -37,6 +50,13 @@ impl<T: TaskCell + Send> TaskInjector<T> {
         match &self.0 {
             InjectorInner::SingleLevel(q) => q.push(task_cell),
             InjectorInner::Multilevel(q) => q.push(task_cell),
+        }
+    }
+
+    pub fn default_extras(&self) -> Extras {
+        match self.0 {
+            InjectorInner::SingleLevel(_) => Extras::single_level(),
+            InjectorInner::Multilevel(_) => Extras::multilevel_default(),
         }
     }
 }
@@ -55,7 +75,7 @@ pub struct Pop<T> {
 }
 
 /// The local queue of a task queue.
-pub struct LocalQueue<T>(LocalQueueInner<T>);
+pub(crate) struct LocalQueue<T>(LocalQueueInner<T>);
 
 enum LocalQueueInner<T> {
     SingleLevel(single_level::LocalQueue<T>),
@@ -79,10 +99,46 @@ impl<T: TaskCell + Send> LocalQueue<T> {
             LocalQueueInner::Multilevel(q) => q.pop(),
         }
     }
+
+    pub fn default_extras(&self) -> Extras {
+        match self.0 {
+            LocalQueueInner::SingleLevel(_) => Extras::single_level(),
+            LocalQueueInner::Multilevel(_) => Extras::multilevel_default(),
+        }
+    }
+}
+
+/// Supported available queues.
+pub enum QueueType {
+    /// A single level work stealing queue.
+    SingleLevel,
+    /// A multilevel feedback queue.
+    ///
+    /// More to see: https://en.wikipedia.org/wiki/Multilevel_feedback_queue.
+    Multilevel(multilevel::Builder),
+}
+
+impl Default for QueueType {
+    fn default() -> QueueType {
+        QueueType::SingleLevel
+    }
+}
+
+impl From<multilevel::Builder> for QueueType {
+    fn from(b: multilevel::Builder) -> QueueType {
+        QueueType::Multilevel(b)
+    }
+}
+
+pub(crate) fn build<T>(ty: QueueType, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+    match ty {
+        QueueType::SingleLevel => single_level(local_num),
+        QueueType::Multilevel(b) => b.build(local_num),
+    }
 }
 
 /// Creates a task queue that allows given number consumers.
-pub fn single_level<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+fn single_level<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
     let (injector, locals) = single_level::create(local_num);
     (
         TaskInjector(InjectorInner::SingleLevel(injector)),

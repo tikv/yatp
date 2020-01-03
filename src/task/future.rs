@@ -3,7 +3,7 @@
 //! A [`Future`].
 
 use crate::pool::{Local, Remote};
-use crate::queue::Extras;
+use crate::queue::{Extras, WithExtras};
 
 use std::borrow::Cow;
 use std::cell::{Cell, UnsafeCell};
@@ -42,6 +42,15 @@ impl fmt::Debug for TaskCell {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         "future::TaskCell".fmt(f)
+    }
+}
+
+impl<F> WithExtras<TaskCell> for F
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    fn with_extras(self, extras: impl FnOnce() -> Extras) -> TaskCell {
+        TaskCell::new(self, extras())
     }
 }
 
@@ -151,6 +160,12 @@ unsafe fn task_cell(task: *const Task) -> TaskCell {
 #[inline]
 unsafe fn clone_task(task: *const Task) -> TaskCell {
     let task_cell = task_cell(task);
+    let extras = { &mut *task_cell.0.extras.get() };
+    if extras.remote.is_none() {
+        LOCAL.with(|l| {
+            extras.remote = Some((&*l.get()).remote());
+        })
+    }
     mem::forget(task_cell.0.clone());
     task_cell
 }
@@ -299,7 +314,7 @@ impl Future for Reschedule {
 mod tests {
     use super::*;
     use crate::pool::{build_spawn, Runner as _};
-    use crate::queue;
+    use crate::queue::QueueType;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -313,7 +328,7 @@ mod tests {
 
     impl MockLocal {
         fn new(runner: Runner) -> MockLocal {
-            let (remote, locals) = build_spawn(queue::single_level, Default::default());
+            let (remote, locals) = build_spawn(QueueType::SingleLevel, Default::default());
             MockLocal {
                 runner: Rc::new(RefCell::new(runner)),
                 remote,
@@ -375,9 +390,7 @@ mod tests {
             WakeLater::new(waker_tx.clone()).await;
             res_tx.send(2).unwrap();
         };
-        local
-            .remote
-            .spawn(TaskCell::new(fut, Extras::single_level()));
+        local.remote.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -438,9 +451,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(2).unwrap();
         };
-        local
-            .remote
-            .spawn(TaskCell::new(fut, Extras::single_level()));
+        local.remote.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -461,9 +472,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(4).unwrap();
         };
-        local
-            .remote
-            .spawn(TaskCell::new(fut, Extras::single_level()));
+        local.remote.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -487,9 +496,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(3).unwrap();
         };
-        local
-            .remote
-            .spawn(TaskCell::new(fut, Extras::single_level()));
+        local.remote.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);

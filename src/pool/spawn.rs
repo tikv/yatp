@@ -5,7 +5,7 @@
 //! tasks waiting to be handled.
 
 use crate::pool::SchedConfig;
-use crate::queue::{LocalQueue, Pop, TaskCell, TaskInjector};
+use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -127,6 +127,10 @@ impl<T: TaskCell + Send> QueueCore<T> {
         self.global_queue.push(task);
         self.ensure_workers(source);
     }
+
+    fn default_extras(&self) -> Extras {
+        self.global_queue.default_extras()
+    }
 }
 
 /// Submits tasks to associated thread pool.
@@ -143,8 +147,9 @@ impl<T: TaskCell + Send> Remote<T> {
     }
 
     /// Submits a task to the thread pool.
-    pub fn spawn(&self, task: impl Into<T>) {
-        self.core.push(0, task.into());
+    pub fn spawn(&self, task: impl WithExtras<T>) {
+        let t = task.with_extras(|| self.core.default_extras());
+        self.core.push(0, t);
     }
 
     pub(crate) fn stop(&self) {
@@ -189,13 +194,15 @@ impl<T: TaskCell + Send> Local<T> {
     }
 
     /// Spawns a task to the local queue.
-    pub fn spawn(&mut self, task: T) {
-        self.local_queue.push(task);
+    pub fn spawn(&mut self, task: impl WithExtras<T>) {
+        let t = task.with_extras(|| self.local_queue.default_extras());
+        self.local_queue.push(t);
     }
 
     /// Spawns a task to the remote queue.
-    pub fn spawn_remote(&self, task: T) {
-        self.core.push(self.id, task);
+    pub fn spawn_remote(&self, task: impl WithExtras<T>) {
+        let t = task.with_extras(|| self.local_queue.default_extras());
+        self.core.push(self.id, t);
     }
 
     /// Gets a remote so that tasks can be spawned from other threads.
@@ -252,12 +259,15 @@ impl<T: TaskCell + Send> Local<T> {
 ///
 /// This is only for tests purpose so that a thread pool doesn't have to be
 /// spawned to test a Runner.
-pub fn build_spawn<F, T>(f: F, config: SchedConfig) -> (Remote<T>, Vec<Local<T>>)
+pub fn build_spawn<T>(
+    queue_type: impl Into<crate::queue::QueueType>,
+    config: SchedConfig,
+) -> (Remote<T>, Vec<Local<T>>)
 where
-    F: FnOnce(usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>),
     T: TaskCell + Send,
 {
-    let (global, locals) = f(config.max_thread_count);
+    let queue_type = queue_type.into();
+    let (global, locals) = crate::queue::build(queue_type, config.max_thread_count);
     let core = Arc::new(QueueCore::new(global, config));
     let l = locals
         .into_iter()

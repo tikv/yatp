@@ -3,7 +3,7 @@
 //! A [`FnOnce`] or [`FnMut`] closure.
 
 use crate::pool::Local;
-use crate::queue::Extras;
+use crate::queue::{Extras, WithExtras};
 
 /// A callback task, which is either a [`FnOnce`] or a [`FnMut`].
 pub enum Task {
@@ -39,14 +39,14 @@ impl crate::queue::TaskCell for TaskCell {
     }
 }
 
-impl<F> From<F> for TaskCell
+impl<F> WithExtras<TaskCell> for F
 where
     F: FnOnce(&mut Handle<'_>) + Send + 'static,
 {
-    fn from(f: F) -> TaskCell {
+    fn with_extras(self, extras: impl FnOnce() -> Extras) -> TaskCell {
         TaskCell {
-            task: Task::new_once(f),
-            extras: Extras::single_level(),
+            task: Task::new_once(self),
+            extras: extras(),
         }
     }
 }
@@ -157,12 +157,12 @@ impl crate::pool::Runner for Runner {
 mod tests {
     use super::*;
     use crate::pool::{build_spawn, Runner as _};
-    use crate::queue;
+    use crate::queue::QueueType;
     use std::sync::mpsc;
 
     #[test]
     fn test_once() {
-        let (_, mut locals) = build_spawn(queue::single_level, Default::default());
+        let (_, mut locals) = build_spawn(QueueType::SingleLevel, Default::default());
         let mut runner = Runner::default();
         let (tx, rx) = mpsc::channel();
         runner.handle(
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_mut_no_respawn() {
-        let (_, mut locals) = build_spawn(queue::single_level, Default::default());
+        let (_, mut locals) = build_spawn(QueueType::SingleLevel, Default::default());
         let mut runner = Runner::new(1);
         let (tx, rx) = mpsc::channel();
 
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_mut_respawn() {
-        let (_, mut locals) = build_spawn(queue::single_level, Default::default());
+        let (_, mut locals) = build_spawn(QueueType::SingleLevel, Default::default());
         let mut runner = Runner::new(1);
         let (tx, rx) = mpsc::channel();
 
