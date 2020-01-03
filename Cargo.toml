@@ -14,3 +14,28 @@ parking_lot_core = "0.7"
 crossbeam-deque = "0.7"
 dashmap = "1.2.0"
 rand = "0.7"
+
+[dev-dependencies]
+criterion = "*"
+tokio = { version = "0.2.0", features = ["sync", "rt-threaded"] }
+async-std = "1.0"
+threadpool = "1.0"
+
+[[bench]]
+name = "spawn_many"
+harness = false
+
+[[bench]]
+name = "yield_many"
+harness = false
+
+[[bench]]
+name = "chained_spawn"
+harness = false
+
+[[bench]]
+name = "ping_pong"
+harness = false
+
+[profile.bench]
+codegen-units = 1

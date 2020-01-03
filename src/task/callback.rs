@@ -77,6 +77,11 @@ impl<'a> Handle<'a> {
         });
     }
 
+    /// Spawns a task to the thread pool.
+    pub fn spawn(&mut self, t: impl WithExtras<TaskCell>) {
+        self.local.spawn(t)
+    }
+
     /// Sets whether this task should be rerun later.
     pub fn set_rerun(&mut self, rerun: bool) {
         self.rerun = rerun;
