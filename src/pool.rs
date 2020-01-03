@@ -45,8 +45,8 @@ impl<T: TaskCell + Send> ThreadPool<T> {
     }
 
     /// Get a remote queue for spawning tasks without owning the thread pool.
-    pub fn remote(&self) -> Remote<T> {
-        self.remote.clone()
+    pub fn remote(&self) -> &Remote<T> {
+        &self.remote
     }
 }
 
