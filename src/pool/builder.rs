@@ -228,7 +228,7 @@ impl Builder {
     /// Spawns a future pool.
     ///
     /// It setups the pool with single level queue.
-    pub fn build_future_pool<T, B>(&self) -> ThreadPool<future::TaskCell> {
+    pub fn build_future_pool(&self) -> ThreadPool<future::TaskCell> {
         let fb = CloneRunnerBuilder(future::Runner::default());
         self.build_with_queue_and_runner(QueueType::SingleLevel, fb)
     }
