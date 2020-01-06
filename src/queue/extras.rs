@@ -2,15 +2,15 @@
 
 use super::multilevel::ElapsedTime;
 
+use crate::time::CoarseInstant;
 use rand::prelude::*;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// The extras for the task cells pushed into a queue.
 #[derive(Debug, Clone)]
 pub struct Extras {
     /// The instant when the task cell is pushed to the queue.
-    pub(crate) schedule_time: Option<Instant>,
+    pub(crate) schedule_time: Option<CoarseInstant>,
     /// The identifier of the task. Only used in the multilevel task queue.
     pub(crate) task_id: u64,
     /// The time spent on handling this task. Only used in the multilevel task

@@ -7,11 +7,11 @@
 
 use super::{Pop, TaskCell};
 
+use crate::time::CoarseInstant;
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use rand::prelude::*;
 use std::iter;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// The injector of a single level work stealing task queue.
 pub struct TaskInjector<T>(Arc<Injector<T>>);
@@ -26,7 +26,7 @@ fn set_schedule_time<T>(task_cell: &mut T)
 where
     T: TaskCell,
 {
-    task_cell.mut_extras().schedule_time = Some(Instant::now());
+    task_cell.mut_extras().schedule_time = Some(CoarseInstant::now());
 }
 
 impl<T> TaskInjector<T>

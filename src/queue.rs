@@ -15,7 +15,7 @@ mod single_level;
 
 pub use self::extras::Extras;
 
-use std::time::Instant;
+use crate::time::CoarseInstant;
 
 /// A cell containing a task and needed extra information.
 pub trait TaskCell {
@@ -67,7 +67,8 @@ pub struct Pop<T> {
     pub task_cell: T,
 
     /// When the task was pushed to the queue.
-    pub schedule_time: Instant,
+    #[allow(dead_code)]
+    pub(crate) schedule_time: CoarseInstant,
 
     /// Whether the task comes from the current [`LocalQueue`] instead of being
     /// just stolen from the injector or other [`LocalQueue`]s.

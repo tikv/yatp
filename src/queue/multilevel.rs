@@ -9,6 +9,7 @@
 use super::{Pop, TaskCell};
 use crate::pool::{Local, Runner, RunnerBuilder};
 
+use crate::time::CoarseInstant;
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use dashmap::DashMap;
 use rand::prelude::*;
@@ -17,7 +18,7 @@ use std::cmp;
 use std::iter;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const LEVEL_NUM: usize = 3;
 
@@ -201,7 +202,7 @@ where
         let extras = task_cell.mut_extras();
         let running_time = extras.running_time.clone();
         let level = extras.current_level;
-        let begin = Instant::now();
+        let begin = CoarseInstant::now();
         let res = self.inner.handle(local, task_cell);
         let elapsed = begin.elapsed();
         if let Some(running_time) = running_time {
@@ -263,7 +264,7 @@ impl LevelManager {
             }
         };
         extras.current_level = current_level;
-        extras.schedule_time = Some(now());
+        extras.schedule_time = Some(CoarseInstant::now());
     }
 
     fn get_level0_chance(&self) -> u32 {
@@ -320,13 +321,13 @@ impl ElapsedTime {
     }
 }
 
-thread_local!(static TLS_LAST_CLEANUP_TIME: Cell<Instant> = Cell::new(Instant::now()));
+thread_local!(static TLS_LAST_CLEANUP_TIME: Cell<CoarseInstant> = Cell::new(CoarseInstant::now()));
 
 struct TaskElapsedMap {
     new_index: AtomicUsize,
     maps: [DashMap<u64, Arc<ElapsedTime>>; 2],
     cleanup_interval: Duration,
-    last_cleanup_time: Mutex<Instant>,
+    last_cleanup_time: Mutex<CoarseInstant>,
     cleaning_up: AtomicBool,
 }
 
@@ -342,7 +343,7 @@ impl TaskElapsedMap {
             new_index: AtomicUsize::new(0),
             maps: Default::default(),
             cleanup_interval,
-            last_cleanup_time: Mutex::new(now()),
+            last_cleanup_time: Mutex::new(CoarseInstant::now()),
             cleaning_up: AtomicBool::new(false),
         }
     }
@@ -365,7 +366,7 @@ impl TaskElapsedMap {
             }
         };
         TLS_LAST_CLEANUP_TIME.with(|t| {
-            if recent().saturating_duration_since(t.get()) > self.cleanup_interval {
+            if CoarseInstant::now().duration_since(t.get()) > self.cleanup_interval {
                 self.maybe_cleanup();
             }
         });
@@ -374,14 +375,13 @@ impl TaskElapsedMap {
 
     fn maybe_cleanup(&self) {
         let last_cleanup_time = *self.last_cleanup_time.lock().unwrap();
-        let do_cleanup = recent().saturating_duration_since(last_cleanup_time)
-            > self.cleanup_interval
+        let now = CoarseInstant::now();
+        let do_cleanup = now.duration_since(last_cleanup_time) > self.cleanup_interval
             && !self.cleaning_up.compare_and_swap(false, true, SeqCst);
         let last_cleanup_time = if do_cleanup {
             let old_index = self.new_index.load(SeqCst) ^ 1;
             self.maps[old_index].clear();
             self.new_index.store(old_index, SeqCst);
-            let now = now();
             *self.last_cleanup_time.lock().unwrap() = now;
             self.cleaning_up.store(false, SeqCst);
             now
@@ -513,24 +513,6 @@ impl Builder {
     }
 }
 
-thread_local!(static RECENT_NOW: Cell<Instant> = Cell::new(Instant::now()));
-
-/// Returns an instant corresponding to now and updates the thread-local recent
-/// now.
-fn now() -> Instant {
-    let res = Instant::now();
-    RECENT_NOW.with(|r| r.set(res));
-    res
-}
-
-/// Returns the thread-local recent now. It is used to save the cost of calling
-/// `Instant::now` frequently.
-///
-/// You should only use it when the thread-local recent now is recently updated.
-fn recent() -> Instant {
-    RECENT_NOW.with(|r| r.get())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,18 +541,15 @@ mod tests {
 
         // Trigger a cleanup
         thread::sleep(Duration::from_millis(200));
-        now(); // Update recent now
         map.get_elapsed(2).inc_by(Duration::from_secs(1));
         // After one cleanup, we can still read the old stats
         assert_eq!(map.get_elapsed(1).as_duration(), Duration::from_secs(1));
 
         // Trigger a cleanup
         thread::sleep(Duration::from_millis(200));
-        now();
         map.get_elapsed(2).inc_by(Duration::from_secs(1));
         // Trigger another cleanup
         thread::sleep(Duration::from_millis(200));
-        now();
         map.get_elapsed(2).inc_by(Duration::from_secs(1));
         assert_eq!(map.get_elapsed(2).as_duration(), Duration::from_secs(3));
 

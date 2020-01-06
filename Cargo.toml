@@ -14,6 +14,7 @@ parking_lot_core = "0.7"
 crossbeam-deque = "0.7"
 dashmap = "1.2.0"
 rand = "0.7"
+libc = "0.2"
 
 [dev-dependencies]
 criterion = "0.3"
