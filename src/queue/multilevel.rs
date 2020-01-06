@@ -65,6 +65,14 @@ where
         let level = task_cell.mut_extras().current_level as usize;
         self.level_injectors[level].push(task_cell);
     }
+
+    pub(super) fn statistics(&self) -> MultilevelStatistics {
+        MultilevelStatistics {
+            level0_elapsed: self.manager.level0_elapsed.as_duration(),
+            total_elapsed: self.manager.total_elapsed.as_duration(),
+            level0_chance: self.manager.get_level0_chance() as f64 / u32::max_value() as f64,
+        }
+    }
 }
 
 /// The local queue of a multilevel task queue.
@@ -392,6 +400,20 @@ impl TaskElapsedMap {
             t.set(last_cleanup_time);
         });
     }
+}
+
+/// The statistics of a multilevel task queue.
+pub struct MultilevelStatistics {
+    /// Elapsed time of level 0 tasks.
+    pub level0_elapsed: Duration,
+    /// Elapsed time of all tasks.
+    pub total_elapsed: Duration,
+    /// The chance that a level 0 task is scheduled to run.
+    pub level0_chance: f64,
+    // To be added:
+    // - Task number in each level
+    // - Elapsed time of tasks in level 1 and 2
+    // - TaskElapsedMap size
 }
 
 /// The configurations of multilevel task queues.

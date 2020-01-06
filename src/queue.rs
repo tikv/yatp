@@ -15,6 +15,7 @@ mod single_level;
 
 pub use self::extras::Extras;
 
+use self::multilevel::MultilevelStatistics;
 use std::time::Instant;
 
 /// A cell containing a task and needed extra information.
@@ -57,6 +58,13 @@ impl<T: TaskCell + Send> TaskInjector<T> {
         match self.0 {
             InjectorInner::SingleLevel(_) => Extras::single_level(),
             InjectorInner::Multilevel(_) => Extras::multilevel_default(),
+        }
+    }
+
+    pub(super) fn statistics(&self) -> QueueStatistics {
+        match &self.0 {
+            InjectorInner::SingleLevel(_) => QueueStatistics::SingleLevel,
+            InjectorInner::Multilevel(q) => QueueStatistics::Multilevel(q.statistics()),
         }
     }
 }
@@ -106,6 +114,15 @@ impl<T: TaskCell + Send> LocalQueue<T> {
             LocalQueueInner::Multilevel(_) => Extras::multilevel_default(),
         }
     }
+}
+
+/// Statistics of the task queue.
+pub enum QueueStatistics {
+    // TODO: add statistics for single level queue
+    /// Statistics of a single-level queue.
+    SingleLevel,
+    /// Statistics of a multilevel queue.
+    Multilevel(MultilevelStatistics),
 }
 
 /// Supported available queues.

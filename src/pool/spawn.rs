@@ -5,7 +5,7 @@
 //! tasks waiting to be handled.
 
 use crate::pool::SchedConfig;
-use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
+use crate::queue::{Extras, LocalQueue, Pop, QueueStatistics, TaskCell, TaskInjector, WithExtras};
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -131,6 +131,10 @@ impl<T: TaskCell + Send> QueueCore<T> {
     fn default_extras(&self) -> Extras {
         self.global_queue.default_extras()
     }
+
+    pub fn queue_statistics(&self) -> QueueStatistics {
+        self.global_queue.statistics()
+    }
 }
 
 /// Submits tasks to associated thread pool.
@@ -150,6 +154,11 @@ impl<T: TaskCell + Send> Remote<T> {
     pub fn spawn(&self, task: impl WithExtras<T>) {
         let t = task.with_extras(|| self.core.default_extras());
         self.core.push(0, t);
+    }
+
+    /// Gets the task queue statistics of the thread pool.
+    pub fn queue_statistics(&self) -> QueueStatistics {
+        self.core.queue_statistics()
     }
 
     pub(crate) fn stop(&self) {
