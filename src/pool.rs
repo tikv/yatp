@@ -14,7 +14,7 @@ pub use self::builder::{Builder, SchedConfig};
 pub use self::runner::{CloneRunnerBuilder, Runner, RunnerBuilder};
 pub use self::spawn::{build_spawn, Local, Remote};
 
-use crate::queue::{QueueStatistics, TaskCell, WithExtras};
+use crate::queue::{TaskCell, WithExtras};
 use std::mem;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
@@ -47,11 +47,6 @@ impl<T: TaskCell + Send> ThreadPool<T> {
     /// Get a remote queue for spawning tasks without owning the thread pool.
     pub fn remote(&self) -> &Remote<T> {
         &self.remote
-    }
-
-    /// Gets the task queue statistics of the thread pool.
-    pub fn queue_statistics(&self) -> QueueStatistics {
-        self.remote.queue_statistics()
     }
 }
 
