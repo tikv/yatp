@@ -20,12 +20,12 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 
 /// A generic thread pool.
-pub struct ThreadPool<T: TaskCell + Send> {
+pub struct ThreadPool<T: TaskCell + Send + 'static> {
     remote: Remote<T>,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
-impl<T: TaskCell + Send> ThreadPool<T> {
+impl<T: TaskCell + Send + 'static> ThreadPool<T> {
     /// Spawns the task into the thread pool.
     ///
     /// If the pool is shutdown, it becomes no-op.
@@ -50,7 +50,7 @@ impl<T: TaskCell + Send> ThreadPool<T> {
     }
 }
 
-impl<T: TaskCell + Send> Drop for ThreadPool<T> {
+impl<T: TaskCell + Send + 'static> Drop for ThreadPool<T> {
     /// Will shutdown the thread pool if it has not.
     fn drop(&mut self) {
         self.shutdown();

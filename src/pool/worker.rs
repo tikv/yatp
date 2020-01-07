@@ -2,7 +2,10 @@
 
 use crate::pool::{Local, Runner};
 use crate::queue::{Pop, TaskCell};
+use crossbeam_deque::Worker;
 use parking_lot_core::SpinWait;
+use std::cell::UnsafeCell;
+use std::rc::Rc;
 
 pub(crate) struct WorkerThread<T, R> {
     local: Local<T>,
@@ -17,7 +20,7 @@ impl<T, R> WorkerThread<T, R> {
 
 impl<T, R> WorkerThread<T, R>
 where
-    T: TaskCell + Send,
+    T: TaskCell + Send + 'static,
     R: Runner<TaskCell = T>,
 {
     #[inline]
@@ -55,7 +58,7 @@ where
 mod tests {
     use super::*;
     use crate::pool::spawn::*;
-    use crate::queue::QueueType;
+    use crate::queue::{self, QueueType};
     use crate::task::callback;
     use std::sync::*;
     use std::time::*;
@@ -121,9 +124,13 @@ mod tests {
         };
         let metrics = r.metrics.clone();
         let mut expected_metrics = Metrics::default();
-        let (injector, mut locals) = build_spawn(QueueType::SingleLevel, Default::default());
-        let th = WorkerThread::new(locals.remove(0), r);
+        let (injector, mut local_builders) = queue::build(QueueType::SingleLevel, num_cpus::get());
+        let core = Arc::new(QueueCore::new(injector, Default::default()));
+        let remote = Remote::new(core.clone());
+        let local_builder = local_builders.remove(0);
         let handle = std::thread::spawn(move || {
+            let local = Local::new(1, local_builder(), core);
+            let th = WorkerThread::new(local, r);
             th.run();
         });
         rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -131,14 +138,14 @@ mod tests {
         expected_metrics.pause = 1;
         assert_eq!(expected_metrics, *metrics.lock().unwrap());
 
-        injector.spawn(move |_: &mut callback::Handle<'_>| {});
+        remote.spawn(move |_: &mut callback::Handle<'_>| {});
         rx.recv_timeout(Duration::from_secs(1)).unwrap();
         expected_metrics.pause = 2;
         expected_metrics.handle = 1;
         expected_metrics.resume = 1;
         assert_eq!(expected_metrics, *metrics.lock().unwrap());
 
-        injector.stop();
+        remote.stop();
         handle.join().unwrap();
         expected_metrics.resume = 2;
         expected_metrics.end = 1;

@@ -6,7 +6,7 @@
 //! The task queue requires that the accompanying [`MultilevelRunner`] must be
 //! used to collect necessary information.
 
-use super::{Pop, TaskCell};
+use super::{LocalInjector, LocalQueueBuilder, Pop, TaskCell};
 use crate::pool::{Local, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
@@ -15,6 +15,7 @@ use rand::prelude::*;
 use std::cell::Cell;
 use std::cmp;
 use std::iter;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -69,7 +70,7 @@ where
 
 /// The local queue of a multilevel task queue.
 pub(crate) struct LocalQueue<T> {
-    local_queue: Worker<T>,
+    local_queue: Rc<Worker<T>>,
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
     stealers: Vec<Stealer<T>>,
     manager: Arc<LevelManager>,
@@ -150,6 +151,10 @@ where
             }
         }
         None
+    }
+
+    pub(super) fn local_injector(&self) -> LocalInjector<T> {
+        LocalInjector(self.local_queue.clone())
     }
 }
 
@@ -459,7 +464,11 @@ impl Builder {
         }
     }
 
-    fn build_raw<T>(self, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+    /// Creates the injector and local queues of the multilevel task queue.
+    pub(crate) fn build<T: Send + 'static>(
+        self,
+        local_num: usize,
+    ) -> (super::TaskInjector<T>, Vec<LocalQueueBuilder<T>>) {
         let level_injectors: Arc<[Injector<T>; LEVEL_NUM]> =
             Arc::new([Injector::new(), Injector::new(), Injector::new()]);
         let workers: Vec<_> = iter::repeat_with(Worker::new_lifo)
@@ -469,46 +478,35 @@ impl Builder {
         let locals = workers
             .into_iter()
             .enumerate()
-            .map(|(self_index, local_queue)| {
-                let mut stealers: Vec<_> = stealers
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| *index != self_index)
-                    .map(|(_, stealer)| stealer.clone())
-                    .collect();
-                // Steal with a random start to avoid imbalance.
-                stealers.shuffle(&mut thread_rng());
-                LocalQueue {
-                    local_queue,
-                    level_injectors: level_injectors.clone(),
-                    stealers,
-                    manager: self.manager.clone(),
-                }
-            })
+            .map(
+                |(self_index, local_queue)| -> Box<dyn FnOnce() -> super::LocalQueue<T> + Send> {
+                    let mut stealers: Vec<_> = stealers
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| *index != self_index)
+                        .map(|(_, stealer)| stealer.clone())
+                        .collect();
+                    // Steal with a random start to avoid imbalance.
+                    stealers.shuffle(&mut thread_rng());
+                    let manager = self.manager.clone();
+                    let level_injectors = level_injectors.clone();
+                    Box::new(move || {
+                        super::LocalQueue(super::LocalQueueInner::Multilevel(LocalQueue {
+                            local_queue: Rc::new(local_queue),
+                            level_injectors,
+                            stealers,
+                            manager,
+                        }))
+                    })
+                },
+            )
             .collect();
-
         (
-            TaskInjector {
+            super::TaskInjector(super::InjectorInner::Multilevel(TaskInjector {
                 level_injectors,
                 manager: self.manager,
-            },
+            })),
             locals,
-        )
-    }
-
-    /// Creates the injector and local queues of the multilevel task queue.
-    pub(crate) fn build<T>(
-        self,
-        local_num: usize,
-    ) -> (super::TaskInjector<T>, Vec<super::LocalQueue<T>>) {
-        let (injector, locals) = self.build_raw(local_num);
-        let local_queues = locals
-            .into_iter()
-            .map(|local| super::LocalQueue(super::LocalQueueInner::Multilevel(local)))
-            .collect();
-        (
-            super::TaskInjector(super::InjectorInner::Multilevel(injector)),
-            local_queues,
         )
     }
 }
@@ -622,7 +620,8 @@ mod tests {
         const SLEEP_DUR: Duration = Duration::from_millis(5);
 
         let builder = Builder::new(Config::default());
-        let (injector, mut locals) = builder.build(1);
+        let (injector, locals) = builder.build(1);
+        let mut locals: Vec<_> = locals.into_iter().map(|b| b()).collect();
         injector.push(MockTask::new(0, Extras::multilevel_default()));
         thread::sleep(SLEEP_DUR);
         let schedule_time = locals[0].pop().unwrap().schedule_time;
@@ -635,7 +634,8 @@ mod tests {
             Config::default()
                 .level_time_threshold([Duration::from_millis(1), Duration::from_millis(100)]),
         );
-        let (injector, _) = builder.build_raw(1);
+        let (injector, _) = builder.build(1);
+        let injector = injector.into_multilevel();
 
         // Running time is 50us. It should be pushed to level 0.
         let extras = Extras {
@@ -706,7 +706,9 @@ mod tests {
     #[test]
     fn test_pop_by_stealing_injector() {
         let builder = Builder::new(Config::default());
-        let (injector, mut locals) = builder.build(3);
+        let (injector, locals) = builder.build(3);
+        let injector = injector.into_multilevel();
+        let mut locals: Vec<_> = locals.into_iter().map(|b| b()).collect();
         for i in 0..100 {
             injector.push(MockTask::new(i, Extras::multilevel_default()));
         }
@@ -720,7 +722,9 @@ mod tests {
     #[test]
     fn test_pop_by_steal_others() {
         let builder = Builder::new(Config::default());
-        let (injector, mut locals) = builder.build_raw(3);
+        let (injector, locals) = builder.build(3);
+        let injector = injector.into_multilevel();
+        let mut locals: Vec<_> = locals.into_iter().map(|b| b().into_multilevel()).collect();
         for i in 0..50 {
             injector.push(MockTask::new(i, Extras::multilevel_default()));
         }
@@ -750,9 +754,10 @@ mod tests {
         let sum = Arc::new(AtomicU64::new(0));
         let handles: Vec<_> = locals
             .into_iter()
-            .map(|mut consumer| {
+            .map(|builder| {
                 let sum = sum.clone();
                 thread::spawn(move || {
+                    let mut consumer = builder();
                     while let Some(pop) = consumer.pop() {
                         sum.fetch_add(pop.task_cell.sleep_ms, SeqCst);
                     }

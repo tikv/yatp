@@ -119,7 +119,7 @@ impl<T> QueueCore<T> {
     }
 }
 
-impl<T: TaskCell + Send> QueueCore<T> {
+impl<T: TaskCell + Send + 'static> QueueCore<T> {
     /// Pushes the task to global queue.
     ///
     /// `source` is used to trace who triggers the action.
@@ -141,7 +141,7 @@ pub struct Remote<T> {
     core: Arc<QueueCore<T>>,
 }
 
-impl<T: TaskCell + Send> Remote<T> {
+impl<T: TaskCell + Send + 'static> Remote<T> {
     pub(crate) fn new(core: Arc<QueueCore<T>>) -> Remote<T> {
         Remote { core }
     }
@@ -184,7 +184,7 @@ pub struct Local<T> {
     core: Arc<QueueCore<T>>,
 }
 
-impl<T: TaskCell + Send> Local<T> {
+impl<T: TaskCell + Send + 'static> Local<T> {
     pub(crate) fn new(id: usize, local_queue: LocalQueue<T>, core: Arc<QueueCore<T>>) -> Local<T> {
         Local {
             id,
@@ -264,7 +264,7 @@ pub fn build_spawn<T>(
     config: SchedConfig,
 ) -> (Remote<T>, Vec<Local<T>>)
 where
-    T: TaskCell + Send,
+    T: TaskCell + Send + 'static,
 {
     let queue_type = queue_type.into();
     let (global, locals) = crate::queue::build(queue_type, config.max_thread_count);
@@ -272,7 +272,7 @@ where
     let l = locals
         .into_iter()
         .enumerate()
-        .map(|(i, l)| Local::new(i + 1, l, core.clone()))
+        .map(|(i, builder)| Local::new(i + 1, builder(), core.clone()))
         .collect();
     let g = Remote::new(core);
     (g, l)

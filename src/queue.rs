@@ -15,6 +15,8 @@ mod single_level;
 
 pub use self::extras::Extras;
 
+use crossbeam_deque::Worker;
+use std::rc::Rc;
 use std::time::Instant;
 
 /// A cell containing a task and needed extra information.
@@ -44,7 +46,7 @@ enum InjectorInner<T> {
     Multilevel(multilevel::TaskInjector<T>),
 }
 
-impl<T: TaskCell + Send> TaskInjector<T> {
+impl<T: TaskCell + Send + 'static> TaskInjector<T> {
     /// Pushes a task to the queue.
     pub fn push(&self, task_cell: T) {
         match &self.0 {
@@ -57,6 +59,22 @@ impl<T: TaskCell + Send> TaskInjector<T> {
         match self.0 {
             InjectorInner::SingleLevel(_) => Extras::single_level(),
             InjectorInner::Multilevel(_) => Extras::multilevel_default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn into_single_level(self) -> single_level::TaskInjector<T> {
+        match self.0 {
+            InjectorInner::SingleLevel(inj) => inj,
+            _ => unreachable!(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn into_multilevel(self) -> multilevel::TaskInjector<T> {
+        match self.0 {
+            InjectorInner::Multilevel(inj) => inj,
+            _ => unreachable!(),
         }
     }
 }
@@ -106,6 +124,38 @@ impl<T: TaskCell + Send> LocalQueue<T> {
             LocalQueueInner::Multilevel(_) => Extras::multilevel_default(),
         }
     }
+
+    pub fn local_injector(&self) -> LocalInjector<T> {
+        match &self.0 {
+            LocalQueueInner::SingleLevel(q) => q.local_injector(),
+            LocalQueueInner::Multilevel(q) => q.local_injector(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn into_single_level(self) -> single_level::LocalQueue<T> {
+        match self.0 {
+            LocalQueueInner::SingleLevel(q) => q,
+            _ => unreachable!(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn into_multilevel(self) -> multilevel::LocalQueue<T> {
+        match self.0 {
+            LocalQueueInner::Multilevel(q) => q,
+            _ => unreachable!(),
+        }
+    }
+}
+
+// Note: Change it from struct to enum if there are other injector types.
+pub(crate) struct LocalInjector<T>(Rc<Worker<T>>);
+
+impl<T> LocalInjector<T> {
+    fn push(&self, task: T) {
+        self.0.push(task);
+    }
 }
 
 /// Supported available queues.
@@ -130,21 +180,14 @@ impl From<multilevel::Builder> for QueueType {
     }
 }
 
-pub(crate) fn build<T>(ty: QueueType, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
+pub(crate) fn build<T: Send + 'static>(
+    ty: QueueType,
+    local_num: usize,
+) -> (TaskInjector<T>, Vec<LocalQueueBuilder<T>>) {
     match ty {
-        QueueType::SingleLevel => single_level(local_num),
+        QueueType::SingleLevel => single_level::create(local_num),
         QueueType::Multilevel(b) => b.build(local_num),
     }
 }
 
-/// Creates a task queue that allows given number consumers.
-fn single_level<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
-    let (injector, locals) = single_level::create(local_num);
-    (
-        TaskInjector(InjectorInner::SingleLevel(injector)),
-        locals
-            .into_iter()
-            .map(|i| LocalQueue(LocalQueueInner::SingleLevel(i)))
-            .collect(),
-    )
-}
+pub(crate) type LocalQueueBuilder<T> = Box<dyn FnOnce() -> LocalQueue<T> + Send>;

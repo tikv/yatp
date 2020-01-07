@@ -3,7 +3,7 @@
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
 use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
-use crate::queue::{self, LocalQueue, QueueType, TaskCell};
+use crate::queue::{self, LocalQueueBuilder, QueueType, TaskCell};
 use crate::task::{callback, future};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -46,13 +46,13 @@ impl Default for SchedConfig {
 }
 
 /// A builder for lazy spawning.
-pub struct LazyBuilder<T> {
+pub struct LazyBuilder<T: Send + 'static> {
     builder: Builder,
     core: Arc<QueueCore<T>>,
-    local_queues: Vec<LocalQueue<T>>,
+    local_queue_builders: Vec<LocalQueueBuilder<T>>,
 }
 
-impl<T> LazyBuilder<T> {
+impl<T: Send + 'static> LazyBuilder<T> {
     /// Sets the name prefix of threads. The thread name will follow the
     /// format "prefix-index".
     pub fn name(mut self, name_prefix: impl Into<String>) -> LazyBuilder<T> {
@@ -61,7 +61,7 @@ impl<T> LazyBuilder<T> {
     }
 }
 
-impl<T> LazyBuilder<T>
+impl<T: Send + 'static> LazyBuilder<T>
 where
     T: TaskCell + Send + 'static,
 {
@@ -76,18 +76,19 @@ where
         F::Runner: Runner<TaskCell = T> + Send + 'static,
     {
         let mut threads = Vec::with_capacity(self.builder.sched_config.max_thread_count);
-        for (i, local_queue) in self.local_queues.into_iter().enumerate() {
+        for (i, queue_builder) in self.local_queue_builders.into_iter().enumerate() {
             let runner = factory.build();
             let name = format!("{}-{}", self.builder.name_prefix, i);
             let mut builder = thread::Builder::new().name(name);
             if let Some(size) = self.builder.stack_size {
                 builder = builder.stack_size(size)
             }
-            let local = Local::new(i + 1, local_queue, self.core.clone());
-            let thd = WorkerThread::new(local, runner);
+            let core = self.core.clone();
             threads.push(
                 builder
                     .spawn(move || {
+                        let local = Local::new(i + 1, queue_builder(), core);
+                        let thd = WorkerThread::new(local, runner);
                         thd.run();
                     })
                     .unwrap(),
@@ -204,7 +205,8 @@ impl Builder {
         T: TaskCell + Send,
     {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
-        let (injector, local_queues) = queue::build(queue_type, self.sched_config.max_thread_count);
+        let (injector, local_queue_builders) =
+            queue::build(queue_type, self.sched_config.max_thread_count);
         let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));
 
         (
@@ -212,7 +214,7 @@ impl Builder {
             LazyBuilder {
                 builder: self.clone(),
                 core,
-                local_queues,
+                local_queue_builders,
             },
         )
     }
