@@ -5,7 +5,7 @@
 //! The instant when the task cell is pushed into the queue is recorded
 //! in the extras.
 
-use super::{LocalInjector, LocalQueueBuilder, Pop, TaskCell};
+use super::{LocalQueueBuilder, Pop, TaskCell};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use rand::prelude::*;
@@ -106,6 +106,15 @@ where
 
     pub(super) fn local_injector(&self) -> LocalInjector<T> {
         LocalInjector(self.local_queue.clone())
+    }
+}
+
+pub(crate) struct LocalInjector<T>(Rc<Worker<T>>);
+
+impl<T: TaskCell> LocalInjector<T> {
+    pub(super) fn push(&self, mut task: T) {
+        set_schedule_time(&mut task);
+        self.0.push(task);
     }
 }
 

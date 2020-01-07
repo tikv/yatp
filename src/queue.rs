@@ -15,8 +15,6 @@ mod single_level;
 
 pub use self::extras::Extras;
 
-use crossbeam_deque::Worker;
-use std::rc::Rc;
 use std::time::Instant;
 
 /// A cell containing a task and needed extra information.
@@ -127,8 +125,8 @@ impl<T: TaskCell + Send> LocalQueue<T> {
 
     pub fn local_injector(&self) -> LocalInjector<T> {
         match &self.0 {
-            LocalQueueInner::SingleLevel(q) => q.local_injector(),
-            LocalQueueInner::Multilevel(q) => q.local_injector(),
+            LocalQueueInner::SingleLevel(q) => LocalInjector::SingleLevel(q.local_injector()),
+            LocalQueueInner::Multilevel(q) => LocalInjector::Multilevel(q.local_injector()),
         }
     }
 
@@ -149,12 +147,17 @@ impl<T: TaskCell + Send> LocalQueue<T> {
     }
 }
 
-// Note: Change it from struct to enum if there are other injector types.
-pub(crate) struct LocalInjector<T>(Rc<Worker<T>>);
+pub(crate) enum LocalInjector<T> {
+    SingleLevel(single_level::LocalInjector<T>),
+    Multilevel(multilevel::LocalInjector<T>),
+}
 
-impl<T> LocalInjector<T> {
-    fn push(&self, task: T) {
-        self.0.push(task);
+impl<T: TaskCell> LocalInjector<T> {
+    pub(crate) fn push(&self, task: T) {
+        match self {
+            LocalInjector::SingleLevel(inj) => inj.push(task),
+            LocalInjector::Multilevel(inj) => inj.push(task),
+        }
     }
 }
 

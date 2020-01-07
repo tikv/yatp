@@ -6,7 +6,7 @@
 //! The task queue requires that the accompanying [`MultilevelRunner`] must be
 //! used to collect necessary information.
 
-use super::{LocalInjector, LocalQueueBuilder, Pop, TaskCell};
+use super::{LocalQueueBuilder, Pop, TaskCell};
 use crate::pool::{Local, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
@@ -154,7 +154,22 @@ where
     }
 
     pub(super) fn local_injector(&self) -> LocalInjector<T> {
-        LocalInjector(self.local_queue.clone())
+        LocalInjector {
+            manager: self.manager.clone(),
+            worker: self.local_queue.clone(),
+        }
+    }
+}
+
+pub(crate) struct LocalInjector<T> {
+    manager: Arc<LevelManager>,
+    worker: Rc<Worker<T>>,
+}
+
+impl<T: TaskCell> LocalInjector<T> {
+    pub(super) fn push(&self, mut task: T) {
+        self.manager.prepare_before_push(&mut task);
+        self.worker.push(task);
     }
 }
 

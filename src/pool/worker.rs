@@ -2,10 +2,7 @@
 
 use crate::pool::{Local, Runner};
 use crate::queue::{Pop, TaskCell};
-use crossbeam_deque::Worker;
 use parking_lot_core::SpinWait;
-use std::cell::UnsafeCell;
-use std::rc::Rc;
 
 pub(crate) struct WorkerThread<T, R> {
     local: Local<T>,
