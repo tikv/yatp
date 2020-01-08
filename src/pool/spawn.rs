@@ -189,6 +189,12 @@ impl<T: TaskCell + Send + 'static> Handle<T> {
         })
     }
 
+    /// Spawns a task to the remote queue.
+    pub fn spawn_remote(&self, task: impl WithExtras<T>) {
+        let t = task.with_extras(|| self.core.default_extras());
+        self.core.push(0, t);
+    }
+
     pub(crate) fn stop(&self) {
         self.core.mark_shutdown(0);
     }

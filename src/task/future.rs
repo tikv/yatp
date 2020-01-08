@@ -160,54 +160,19 @@ unsafe fn task_cell(task: *const Task) -> TaskCell {
 #[inline]
 unsafe fn clone_task(task: *const Task) -> TaskCell {
     let task_cell = task_cell(task);
-    let extras = { &mut *task_cell.0.extras.get() };
-    if extras.handle.is_none() {
-        LOCAL.with(|l| {
-            extras.handle = Some((&*l.get()).handle());
-        })
-    }
     mem::forget(task_cell.0.clone());
     task_cell
 }
 
-thread_local! {
-    /// Local queue reference that is set before polling and unset after polled.
-    static LOCAL: Cell<*mut Local<TaskCell>> = Cell::new(std::ptr::null_mut());
-}
-
 unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
-    LOCAL.with(|ptr| {
-        if ptr.get().is_null() {
-            // It's out of polling process, has to be spawn to global queue.
-            // It needs to clone to make it safe as it's unclear whether `self`
-            // is still used inside method `spawn` after `TaskCell` is dropped.
-            (*task.as_ref().extras.get())
-                .handle
-                .as_ref()
-                .expect("handle should exist!!!")
-                .spawn(TaskCell(task.clone().into_owned()));
-        } else if reschedule {
-            // It's requested explicitly to schedule to global queue.
-            (*ptr.get()).spawn_remote(TaskCell(task.into_owned()));
-        } else {
-            // Otherwise spawns to local queue for best locality.
-            (*ptr.get()).spawn(TaskCell(task.into_owned()));
-        }
-    })
-}
-
-struct Scope<'a>(&'a mut Local<TaskCell>);
-
-impl<'a> Scope<'a> {
-    fn new(l: &'a mut Local<TaskCell>) -> Scope<'a> {
-        LOCAL.with(|c| c.set(l));
-        Scope(l)
-    }
-}
-
-impl<'a> Drop for Scope<'a> {
-    fn drop(&mut self) {
-        LOCAL.with(|c| c.set(std::ptr::null_mut()));
+    let handle = (*task.extras.get())
+        .handle
+        .as_ref()
+        .expect("handle should exist!!!");
+    if !reschedule {
+        handle.spawn(TaskCell(task.into_owned()));
+    } else {
+        handle.spawn_remote(TaskCell(task.into_owned()));
     }
 }
 
@@ -243,7 +208,6 @@ impl crate::pool::Runner for Runner {
     type TaskCell = TaskCell;
 
     fn handle(&mut self, local: &mut Local<TaskCell>, task_cell: TaskCell) -> bool {
-        let _scope = Scope::new(local);
         let task = task_cell.0;
         unsafe {
             let waker = ManuallyDrop::new(waker(&*task));
@@ -255,14 +219,11 @@ impl crate::pool::Runner for Runner {
                     task.status.store(COMPLETED, SeqCst);
                     return true;
                 }
-                let extras = { &mut *task.extras.get() };
-                if extras.handle.is_none() {
-                    // It's possible to avoid assigning handle in some cases, but it requires
-                    // at least one atomic load to detect such situation. So here just assign
-                    // it to make things simple.
-                    LOCAL.with(|l| {
-                        extras.handle = Some((&*l.get()).handle());
-                    })
+                {
+                    let extras = { &mut *task.extras.get() };
+                    if extras.handle.is_none() {
+                        extras.handle = Some(local.handle());
+                    }
                 }
                 match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
                     Ok(_) => return false,
