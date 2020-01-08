@@ -33,7 +33,7 @@ pub fn is_shutdown(cnt: usize) -> bool {
 /// The core of queues.
 ///
 /// Every thread pool instance should have one and only `QueueCore`. It's
-/// saved in an `Arc` and shared between all worker threads and remote handles.
+/// saved in an `Arc` and shared between all worker threads and handles.
 pub(crate) struct QueueCore<T> {
     pool_id: u64,
     global_queue: TaskInjector<T>,
@@ -160,15 +160,15 @@ impl TlsLocalInjector {
 
 /// Submits tasks to associated thread pool.
 ///
-/// Note that thread pool can be shutdown and dropped even not all remotes are
+/// Note that thread pool can be shutdown and dropped even not all handles are
 /// dropped.
-pub struct Remote<T> {
+pub struct Handle<T> {
     core: Arc<QueueCore<T>>,
 }
 
-impl<T: TaskCell + Send + 'static> Remote<T> {
-    pub(crate) fn new(core: Arc<QueueCore<T>>) -> Remote<T> {
-        Remote { core }
+impl<T: TaskCell + Send + 'static> Handle<T> {
+    pub(crate) fn new(core: Arc<QueueCore<T>>) -> Handle<T> {
+        Handle { core }
     }
 
     /// Submits a task to the thread pool.
@@ -194,21 +194,21 @@ impl<T: TaskCell + Send + 'static> Remote<T> {
     }
 }
 
-impl<T> Clone for Remote<T> {
-    fn clone(&self) -> Remote<T> {
-        Remote {
+impl<T> Clone for Handle<T> {
+    fn clone(&self) -> Handle<T> {
+        Handle {
             core: self.core.clone(),
         }
     }
 }
 
-/// Note that implements of Runner assumes `Remote` is `Sync` and `Send`.
+/// Note that implements of Runner assumes `handle` is `Sync` and `Send`.
 /// So we need to use assert trait to ensure the constraint at compile time
 /// to avoid future breaks.
 trait AssertSync: Sync {}
-impl<T: Send> AssertSync for Remote<T> {}
+impl<T: Send> AssertSync for Handle<T> {}
 trait AssertSend: Send {}
-impl<T: Send> AssertSend for Remote<T> {}
+impl<T: Send> AssertSend for Handle<T> {}
 
 /// Spawns tasks to the associated thread pool.
 ///
@@ -248,9 +248,9 @@ impl<T: TaskCell + Send + 'static> Local<T> {
         self.core.push(self.id, t);
     }
 
-    /// Gets a remote so that tasks can be spawned from other threads.
-    pub fn remote(&self) -> Remote<T> {
-        Remote {
+    /// Gets a handle so that tasks can be spawned from other threads.
+    pub fn handle(&self) -> Handle<T> {
+        Handle {
             core: self.core.clone(),
         }
     }
@@ -298,14 +298,14 @@ impl<T: TaskCell + Send + 'static> Local<T> {
     }
 }
 
-/// Building remotes and locals from the given queue and configuration.
+/// Building handles and locals from the given queue and configuration.
 ///
 /// This is only for tests purpose so that a thread pool doesn't have to be
 /// spawned to test a Runner.
 pub fn build_spawn<T>(
     queue_type: impl Into<crate::queue::QueueType>,
     config: SchedConfig,
-) -> (Remote<T>, Vec<Local<T>>)
+) -> (Handle<T>, Vec<Local<T>>)
 where
     T: TaskCell + Send + 'static,
 {
@@ -317,6 +317,6 @@ where
         .enumerate()
         .map(|(i, builder)| Local::new(i + 1, builder(), core.clone()))
         .collect();
-    let g = Remote::new(core);
+    let g = Handle::new(core);
     (g, l)
 }

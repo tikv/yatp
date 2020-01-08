@@ -123,9 +123,9 @@ mod tests {
         let mut expected_metrics = Metrics::default();
         let (injector, mut local_builders) = queue::build(QueueType::SingleLevel, num_cpus::get());
         let core = Arc::new(QueueCore::new(injector, Default::default()));
-        let remote = Remote::new(core.clone());
+        let handle = Handle::new(core.clone());
         let local_builder = local_builders.remove(0);
-        let handle = std::thread::spawn(move || {
+        let join_handle = std::thread::spawn(move || {
             let local = Local::new(1, local_builder(), core);
             let th = WorkerThread::new(local, r);
             th.run();
@@ -135,15 +135,15 @@ mod tests {
         expected_metrics.pause = 1;
         assert_eq!(expected_metrics, *metrics.lock().unwrap());
 
-        remote.spawn(move |_: &mut callback::Handle<'_>| {});
+        handle.spawn(move |_: &mut callback::Handle<'_>| {});
         rx.recv_timeout(Duration::from_secs(1)).unwrap();
         expected_metrics.pause = 2;
         expected_metrics.handle = 1;
         expected_metrics.resume = 1;
         assert_eq!(expected_metrics, *metrics.lock().unwrap());
 
-        remote.stop();
-        handle.join().unwrap();
+        handle.stop();
+        join_handle.join().unwrap();
         expected_metrics.resume = 2;
         expected_metrics.end = 1;
         assert_eq!(expected_metrics, *metrics.lock().unwrap());

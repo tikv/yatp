@@ -2,7 +2,7 @@
 
 //! A [`Future`].
 
-use crate::pool::{Local, Remote};
+use crate::pool::{Handle, Local};
 use crate::queue::{Extras, WithExtras};
 
 use std::borrow::Cow;
@@ -21,7 +21,7 @@ const DEFAULT_REPOLL_LIMIT: usize = 5;
 
 struct TaskExtras {
     extras: Extras,
-    remote: Option<Remote<TaskCell>>,
+    handle: Option<Handle<TaskCell>>,
 }
 
 /// A [`Future`] task.
@@ -74,7 +74,7 @@ impl TaskCell {
             future: UnsafeCell::new(Box::pin(future)),
             extras: UnsafeCell::new(TaskExtras {
                 extras,
-                remote: None,
+                handle: None,
             }),
         }))
     }
@@ -161,9 +161,9 @@ unsafe fn task_cell(task: *const Task) -> TaskCell {
 unsafe fn clone_task(task: *const Task) -> TaskCell {
     let task_cell = task_cell(task);
     let extras = { &mut *task_cell.0.extras.get() };
-    if extras.remote.is_none() {
+    if extras.handle.is_none() {
         LOCAL.with(|l| {
-            extras.remote = Some((&*l.get()).remote());
+            extras.handle = Some((&*l.get()).handle());
         })
     }
     mem::forget(task_cell.0.clone());
@@ -182,9 +182,9 @@ unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
             // It needs to clone to make it safe as it's unclear whether `self`
             // is still used inside method `spawn` after `TaskCell` is dropped.
             (*task.as_ref().extras.get())
-                .remote
+                .handle
                 .as_ref()
-                .expect("remote should exist!!!")
+                .expect("handle should exist!!!")
                 .spawn(TaskCell(task.clone().into_owned()));
         } else if reschedule {
             // It's requested explicitly to schedule to global queue.
@@ -256,12 +256,12 @@ impl crate::pool::Runner for Runner {
                     return true;
                 }
                 let extras = { &mut *task.extras.get() };
-                if extras.remote.is_none() {
-                    // It's possible to avoid assigning remote in some cases, but it requires
+                if extras.handle.is_none() {
+                    // It's possible to avoid assigning handle in some cases, but it requires
                     // at least one atomic load to detect such situation. So here just assign
                     // it to make things simple.
                     LOCAL.with(|l| {
-                        extras.remote = Some((&*l.get()).remote());
+                        extras.handle = Some((&*l.get()).handle());
                     })
                 }
                 match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
@@ -322,16 +322,16 @@ mod tests {
 
     struct MockLocal {
         runner: Rc<RefCell<Runner>>,
-        remote: Remote<TaskCell>,
+        handle: Handle<TaskCell>,
         locals: Vec<Local<TaskCell>>,
     }
 
     impl MockLocal {
         fn new(runner: Runner) -> MockLocal {
-            let (remote, locals) = build_spawn(QueueType::SingleLevel, Default::default());
+            let (handle, locals) = build_spawn(QueueType::SingleLevel, Default::default());
             MockLocal {
                 runner: Rc::new(RefCell::new(runner)),
-                remote,
+                handle,
                 locals,
             }
         }
@@ -390,7 +390,7 @@ mod tests {
             WakeLater::new(waker_tx.clone()).await;
             res_tx.send(2).unwrap();
         };
-        local.remote.spawn(fut);
+        local.handle.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -451,7 +451,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(2).unwrap();
         };
-        local.remote.spawn(fut);
+        local.handle.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -472,7 +472,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(4).unwrap();
         };
-        local.remote.spawn(fut);
+        local.handle.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
@@ -496,7 +496,7 @@ mod tests {
             PendingOnce::new().await;
             res_tx.send(3).unwrap();
         };
-        local.remote.spawn(fut);
+        local.handle.spawn(fut);
 
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);

@@ -2,7 +2,7 @@
 
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
-use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
+use crate::pool::{CloneRunnerBuilder, Handle, Local, Runner, RunnerBuilder, ThreadPool};
 use crate::queue::{self, LocalQueueBuilder, QueueType, TaskCell};
 use crate::task::{callback, future};
 use std::sync::{Arc, Mutex};
@@ -95,7 +95,7 @@ where
             );
         }
         ThreadPool {
-            remote: Remote::new(self.core.clone()),
+            handle: Handle::new(self.core.clone()),
             threads: Mutex::new(threads),
         }
     }
@@ -184,7 +184,7 @@ impl Builder {
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
     /// to separate the construction and starting.
-    pub fn freeze<T>(&self) -> (Remote<T>, LazyBuilder<T>)
+    pub fn freeze<T>(&self) -> (Handle<T>, LazyBuilder<T>)
     where
         T: TaskCell + Send,
     {
@@ -200,7 +200,7 @@ impl Builder {
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
     /// to separate the construction and starting.
-    pub fn freeze_with_queue<T>(&self, queue_type: QueueType) -> (Remote<T>, LazyBuilder<T>)
+    pub fn freeze_with_queue<T>(&self, queue_type: QueueType) -> (Handle<T>, LazyBuilder<T>)
     where
         T: TaskCell + Send,
     {
@@ -210,7 +210,7 @@ impl Builder {
         let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));
 
         (
-            Remote::new(core.clone()),
+            Handle::new(core.clone()),
             LazyBuilder {
                 builder: self.clone(),
                 core,

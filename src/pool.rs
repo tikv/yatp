@@ -12,7 +12,7 @@ mod worker;
 
 pub use self::builder::{Builder, SchedConfig};
 pub use self::runner::{CloneRunnerBuilder, Runner, RunnerBuilder};
-pub use self::spawn::{build_spawn, Local, Remote};
+pub use self::spawn::{build_spawn, Handle, Local};
 
 use crate::queue::{TaskCell, WithExtras};
 use std::mem;
@@ -21,7 +21,7 @@ use std::thread::JoinHandle;
 
 /// A generic thread pool.
 pub struct ThreadPool<T: TaskCell + Send + 'static> {
-    remote: Remote<T>,
+    handle: Handle<T>,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -30,23 +30,23 @@ impl<T: TaskCell + Send + 'static> ThreadPool<T> {
     ///
     /// If the pool is shutdown, it becomes no-op.
     pub fn spawn(&self, t: impl WithExtras<T>) {
-        self.remote.spawn(t);
+        self.handle.spawn(t);
     }
 
     /// Shutdowns the pool.
     ///
     /// Closes the queue and wait for all threads to exit.
     pub fn shutdown(&self) {
-        self.remote.stop();
+        self.handle.stop();
         let mut threads = mem::replace(&mut *self.threads.lock().unwrap(), Vec::new());
         for j in threads.drain(..) {
             j.join().unwrap();
         }
     }
 
-    /// Get a remote queue for spawning tasks without owning the thread pool.
-    pub fn remote(&self) -> &Remote<T> {
-        &self.remote
+    /// Get a handle for spawning tasks without owning the thread pool.
+    pub fn handle(&self) -> &Handle<T> {
+        &self.handle
     }
 }
 

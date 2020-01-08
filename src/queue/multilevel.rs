@@ -790,10 +790,10 @@ mod tests {
         let builder = Builder::new(Config::default());
         let mut runner_builder = builder.runner_builder(MockRunnerBuilder);
         let manager = builder.manager.clone();
-        let (remote, mut locals) = build_spawn(builder, Default::default());
+        let (handle, mut locals) = build_spawn(builder, Default::default());
         let mut runner = runner_builder.build();
 
-        remote.spawn(MockTask::new(100, Extras::new_multilevel(1, None)));
+        handle.spawn(MockTask::new(100, Extras::new_multilevel(1, None)));
         if let Some(Pop { task_cell, .. }) = locals[0].pop() {
             assert!(runner.handle(&mut locals[0], task_cell));
         }
