@@ -9,7 +9,7 @@ use crate::queue::{Extras, LocalInjector, LocalQueue, Pop, TaskCell, TaskInjecto
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
 use std::cell::Cell;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// An usize is used to trace the threads that are working actively.
@@ -35,7 +35,6 @@ pub fn is_shutdown(cnt: usize) -> bool {
 /// Every thread pool instance should have one and only `QueueCore`. It's
 /// saved in an `Arc` and shared between all worker threads and handles.
 pub(crate) struct QueueCore<T> {
-    pool_id: u64,
     global_queue: TaskInjector<T>,
     active_workers: AtomicUsize,
     config: SchedConfig,
@@ -44,7 +43,6 @@ pub(crate) struct QueueCore<T> {
 impl<T> QueueCore<T> {
     pub fn new(global_queue: TaskInjector<T>, config: SchedConfig) -> QueueCore<T> {
         QueueCore {
-            pool_id: POOL_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed),
             global_queue,
             active_workers: AtomicUsize::new(config.max_thread_count << WORKER_COUNT_SHIFT),
             config,
@@ -141,11 +139,9 @@ thread_local! {
     static LOCAL_INJECTOR: Cell<TlsLocalInjector> = Cell::new(TlsLocalInjector::uninit());
 }
 
-static POOL_ID_ALLOCATOR: AtomicU64 = AtomicU64::new(1);
-
 #[derive(Copy, Clone)]
 struct TlsLocalInjector {
-    pool_id: u64,
+    pool_id: usize,
     injector_ptr: *mut (),
 }
 
@@ -176,7 +172,7 @@ impl<T: TaskCell + Send + 'static> Handle<T> {
         let t = task.with_extras(|| self.core.default_extras());
         LOCAL_INJECTOR.with(|c| {
             let tls_injector = c.get();
-            if tls_injector.pool_id == self.core.pool_id {
+            if tls_injector.pool_id == &*self.core as *const _ as usize {
                 unsafe {
                     Box::leak(Box::from_raw(
                         tls_injector.injector_ptr as *mut LocalInjector<T>,
@@ -231,7 +227,7 @@ impl<T: TaskCell + Send + 'static> Local<T> {
     pub(crate) fn new(id: usize, local_queue: LocalQueue<T>, core: Arc<QueueCore<T>>) -> Local<T> {
         let local_injector = Box::new(local_queue.local_injector());
         let tls_injector = TlsLocalInjector {
-            pool_id: core.pool_id,
+            pool_id: &*core as *const _ as usize,
             injector_ptr: Box::into_raw(local_injector) as *mut (),
         };
         LOCAL_INJECTOR.with(|c| c.set(tls_injector));

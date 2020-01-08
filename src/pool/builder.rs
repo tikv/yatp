@@ -46,7 +46,7 @@ impl Default for SchedConfig {
 }
 
 /// A builder for lazy spawning.
-pub struct LazyBuilder<T: Send + 'static> {
+pub struct LazyBuilder<T> {
     builder: Builder,
     core: Arc<QueueCore<T>>,
     local_queue_builders: Vec<LocalQueueBuilder<T>>,
@@ -186,7 +186,7 @@ impl Builder {
     /// to separate the construction and starting.
     pub fn freeze<T>(&self) -> (Handle<T>, LazyBuilder<T>)
     where
-        T: TaskCell + Send,
+        T: TaskCell + Send + 'static,
     {
         self.freeze_with_queue(QueueType::SingleLevel)
     }
@@ -202,7 +202,7 @@ impl Builder {
     /// to separate the construction and starting.
     pub fn freeze_with_queue<T>(&self, queue_type: QueueType) -> (Handle<T>, LazyBuilder<T>)
     where
-        T: TaskCell + Send,
+        T: TaskCell + Send + 'static,
     {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
         let (injector, local_queue_builders) =
