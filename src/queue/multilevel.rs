@@ -434,8 +434,8 @@ pub struct Config {
 impl Config {
     /// Sets the name of the multilevel task queue. Metrics of multilevel
     /// task queues are available if name is provided.
-    pub fn name(mut self, name: Option<String>) -> Self {
-        self.name = name;
+    pub fn name(mut self, name: Option<impl Into<String>>) -> Self {
+        self.name = name.map(Into::into);
         self
     }
 
