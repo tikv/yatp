@@ -41,9 +41,16 @@ const ADJUST_CHANCE_INTERVAL_US: i64 = 1_000_000;
 /// exceeds this value, level chances need to be adjusted.
 const ADJUST_CHANCE_THRESHOLD: f64 = 0.05;
 
+/// The initial chance that a level 0 task is scheduled.
+///
+/// The value is not so important because the actual chance will be adjusted
+/// according to the real-time workload.
 const INIT_LEVEL0_CHANCE: f64 = 0.8;
+
 const MIN_LEVEL0_CHANCE: f64 = 0.5;
 const MAX_LEVEL0_CHANCE: f64 = 0.98;
+
+/// The amount that the level 0 chance is increased or decreased each time.
 const ADJUST_AMOUNT: f64 = 0.06;
 
 /// The injector of a multilevel task queue.
