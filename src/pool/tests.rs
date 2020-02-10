@@ -78,21 +78,21 @@ fn test_basic() {
 }
 
 #[test]
-fn test_remote() {
-    let pool = Builder::new("test_remote")
+fn test_handle() {
+    let pool = Builder::new("test_handle")
         .max_thread_count(4)
         .build_callback_pool();
 
-    // Remote should work just like pool.
-    let remote = pool.remote();
+    // Handle should work just like pool.
+    let handle = pool.handle();
     let (tx, rx) = mpsc::channel();
     let t = tx.clone();
-    remote.spawn(move |_: &mut Handle<'_>| t.send(1).unwrap());
+    handle.spawn(move |_: &mut Handle<'_>| t.send(1).unwrap());
     assert_eq!(Ok(1), rx.recv_timeout(Duration::from_millis(500)));
 
     // Shutdown should stop processing tasks.
     pool.shutdown();
-    remote.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap());
+    handle.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap());
     let res = rx.recv_timeout(Duration::from_millis(500));
     assert_eq!(res, Err(mpsc::RecvTimeoutError::Timeout));
 }

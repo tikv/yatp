@@ -65,20 +65,20 @@ mod yatp_future {
             let rem = rem.clone();
             rem.store(ping_count, Ordering::Relaxed);
 
-            let remote = pool.remote().clone();
+            let handle = pool.handle().clone();
 
             pool.spawn(async move {
                 for _ in 0..ping_count {
                     let rem = rem.clone();
                     let done_tx = done_tx.clone();
 
-                    let remote2 = remote.clone();
+                    let handle2 = handle.clone();
 
-                    remote.spawn(async move {
+                    handle.spawn(async move {
                         let (tx1, rx1) = oneshot::channel();
                         let (tx2, rx2) = oneshot::channel();
 
-                        remote2.spawn(async move {
+                        handle2.spawn(async move {
                             rx1.await.unwrap();
                             tx2.send(()).unwrap();
                         });

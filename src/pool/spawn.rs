@@ -5,8 +5,10 @@
 //! tasks waiting to be handled.
 
 use crate::pool::SchedConfig;
-use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
+use crate::queue::{Extras, LocalInjector, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
+use std::cell::Cell;
+use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -31,7 +33,7 @@ pub fn is_shutdown(cnt: usize) -> bool {
 /// The core of queues.
 ///
 /// Every thread pool instance should have one and only `QueueCore`. It's
-/// saved in an `Arc` and shared between all worker threads and remote handles.
+/// saved in an `Arc` and shared between all worker threads and handles.
 pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     active_workers: AtomicUsize,
@@ -119,7 +121,7 @@ impl<T> QueueCore<T> {
     }
 }
 
-impl<T: TaskCell + Send> QueueCore<T> {
+impl<T: TaskCell + Send + 'static> QueueCore<T> {
     /// Pushes the task to global queue.
     ///
     /// `source` is used to trace who triggers the action.
@@ -133,21 +135,58 @@ impl<T: TaskCell + Send> QueueCore<T> {
     }
 }
 
+thread_local! {
+    static LOCAL_INJECTOR: Cell<TlsLocalInjector> = Cell::new(TlsLocalInjector::uninit());
+}
+
+#[derive(Copy, Clone)]
+struct TlsLocalInjector {
+    pool_id: usize,
+    injector_ptr: *mut (),
+}
+
+impl TlsLocalInjector {
+    const fn uninit() -> TlsLocalInjector {
+        TlsLocalInjector {
+            pool_id: 0,
+            injector_ptr: ptr::null_mut(),
+        }
+    }
+}
+
 /// Submits tasks to associated thread pool.
 ///
-/// Note that thread pool can be shutdown and dropped even not all remotes are
+/// Note that thread pool can be shutdown and dropped even not all handles are
 /// dropped.
-pub struct Remote<T> {
+pub struct Handle<T> {
     core: Arc<QueueCore<T>>,
 }
 
-impl<T: TaskCell + Send> Remote<T> {
-    pub(crate) fn new(core: Arc<QueueCore<T>>) -> Remote<T> {
-        Remote { core }
+impl<T: TaskCell + Send + 'static> Handle<T> {
+    pub(crate) fn new(core: Arc<QueueCore<T>>) -> Handle<T> {
+        Handle { core }
     }
 
     /// Submits a task to the thread pool.
     pub fn spawn(&self, task: impl WithExtras<T>) {
+        let t = task.with_extras(|| self.core.default_extras());
+        LOCAL_INJECTOR.with(|c| {
+            let tls_injector = c.get();
+            if tls_injector.pool_id == &*self.core as *const _ as usize {
+                unsafe {
+                    Box::leak(Box::from_raw(
+                        tls_injector.injector_ptr as *mut LocalInjector<T>,
+                    ))
+                    .push(t);
+                }
+            } else {
+                self.core.push(0, t);
+            }
+        })
+    }
+
+    /// Spawns a task to the remote queue.
+    pub fn spawn_remote(&self, task: impl WithExtras<T>) {
         let t = task.with_extras(|| self.core.default_extras());
         self.core.push(0, t);
     }
@@ -157,21 +196,21 @@ impl<T: TaskCell + Send> Remote<T> {
     }
 }
 
-impl<T> Clone for Remote<T> {
-    fn clone(&self) -> Remote<T> {
-        Remote {
+impl<T> Clone for Handle<T> {
+    fn clone(&self) -> Handle<T> {
+        Handle {
             core: self.core.clone(),
         }
     }
 }
 
-/// Note that implements of Runner assumes `Remote` is `Sync` and `Send`.
+/// Note that implements of Runner assumes `handle` is `Sync` and `Send`.
 /// So we need to use assert trait to ensure the constraint at compile time
 /// to avoid future breaks.
 trait AssertSync: Sync {}
-impl<T: Send> AssertSync for Remote<T> {}
+impl<T: Send> AssertSync for Handle<T> {}
 trait AssertSend: Send {}
-impl<T: Send> AssertSend for Remote<T> {}
+impl<T: Send> AssertSend for Handle<T> {}
 
 /// Spawns tasks to the associated thread pool.
 ///
@@ -184,8 +223,14 @@ pub struct Local<T> {
     core: Arc<QueueCore<T>>,
 }
 
-impl<T: TaskCell + Send> Local<T> {
+impl<T: TaskCell + Send + 'static> Local<T> {
     pub(crate) fn new(id: usize, local_queue: LocalQueue<T>, core: Arc<QueueCore<T>>) -> Local<T> {
+        let local_injector = Box::new(local_queue.local_injector());
+        let tls_injector = TlsLocalInjector {
+            pool_id: &*core as *const _ as usize,
+            injector_ptr: Box::into_raw(local_injector) as *mut (),
+        };
+        LOCAL_INJECTOR.with(|c| c.set(tls_injector));
         Local {
             id,
             local_queue,
@@ -205,9 +250,9 @@ impl<T: TaskCell + Send> Local<T> {
         self.core.push(self.id, t);
     }
 
-    /// Gets a remote so that tasks can be spawned from other threads.
-    pub fn remote(&self) -> Remote<T> {
-        Remote {
+    /// Gets a handle so that tasks can be spawned from other threads.
+    pub fn handle(&self) -> Handle<T> {
+        Handle {
             core: self.core.clone(),
         }
     }
@@ -255,16 +300,16 @@ impl<T: TaskCell + Send> Local<T> {
     }
 }
 
-/// Building remotes and locals from the given queue and configuration.
+/// Building handles and locals from the given queue and configuration.
 ///
 /// This is only for tests purpose so that a thread pool doesn't have to be
 /// spawned to test a Runner.
 pub fn build_spawn<T>(
     queue_type: impl Into<crate::queue::QueueType>,
     config: SchedConfig,
-) -> (Remote<T>, Vec<Local<T>>)
+) -> (Handle<T>, Vec<Local<T>>)
 where
-    T: TaskCell + Send,
+    T: TaskCell + Send + 'static,
 {
     let queue_type = queue_type.into();
     let (global, locals) = crate::queue::build(queue_type, config.max_thread_count);
@@ -272,8 +317,8 @@ where
     let l = locals
         .into_iter()
         .enumerate()
-        .map(|(i, l)| Local::new(i + 1, l, core.clone()))
+        .map(|(i, builder)| Local::new(i + 1, builder(), core.clone()))
         .collect();
-    let g = Remote::new(core);
+    let g = Handle::new(core);
     (g, l)
 }

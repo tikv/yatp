@@ -37,17 +37,17 @@ mod yatp_future {
     use criterion::*;
     use std::sync::mpsc;
     use yatp::task::future::TaskCell;
-    use yatp::Remote;
+    use yatp::Handle;
 
     pub fn chained_spawn(b: &mut Bencher<'_>, iter_count: usize) {
         let pool = yatp::Builder::new("chained_spawn").build_future_pool();
 
-        fn iter(remote: Remote<TaskCell>, done_tx: mpsc::SyncSender<()>, n: usize) {
+        fn iter(handle: Handle<TaskCell>, done_tx: mpsc::SyncSender<()>, n: usize) {
             if n == 0 {
                 done_tx.send(()).unwrap();
             } else {
-                let s2 = remote.clone();
-                remote.spawn(async move {
+                let s2 = handle.clone();
+                handle.spawn(async move {
                     iter(s2, done_tx, n - 1);
                 });
             }
@@ -57,9 +57,9 @@ mod yatp_future {
 
         b.iter(move || {
             let done_tx = done_tx.clone();
-            let remote = pool.remote().clone();
+            let handle = pool.handle().clone();
             pool.spawn(async move {
-                iter(remote, done_tx, iter_count);
+                iter(handle, done_tx, iter_count);
             });
 
             done_rx.recv().unwrap();

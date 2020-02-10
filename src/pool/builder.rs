@@ -2,8 +2,8 @@
 
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
-use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
-use crate::queue::{self, LocalQueue, QueueType, TaskCell};
+use crate::pool::{CloneRunnerBuilder, Handle, Local, Runner, RunnerBuilder, ThreadPool};
+use crate::queue::{self, LocalQueueBuilder, QueueType, TaskCell};
 use crate::task::{callback, future};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -49,10 +49,10 @@ impl Default for SchedConfig {
 pub struct LazyBuilder<T> {
     builder: Builder,
     core: Arc<QueueCore<T>>,
-    local_queues: Vec<LocalQueue<T>>,
+    local_queue_builders: Vec<LocalQueueBuilder<T>>,
 }
 
-impl<T> LazyBuilder<T> {
+impl<T: Send + 'static> LazyBuilder<T> {
     /// Sets the name prefix of threads. The thread name will follow the
     /// format "prefix-index".
     pub fn name(mut self, name_prefix: impl Into<String>) -> LazyBuilder<T> {
@@ -61,7 +61,7 @@ impl<T> LazyBuilder<T> {
     }
 }
 
-impl<T> LazyBuilder<T>
+impl<T: Send + 'static> LazyBuilder<T>
 where
     T: TaskCell + Send + 'static,
 {
@@ -76,25 +76,26 @@ where
         F::Runner: Runner<TaskCell = T> + Send + 'static,
     {
         let mut threads = Vec::with_capacity(self.builder.sched_config.max_thread_count);
-        for (i, local_queue) in self.local_queues.into_iter().enumerate() {
+        for (i, queue_builder) in self.local_queue_builders.into_iter().enumerate() {
             let runner = factory.build();
             let name = format!("{}-{}", self.builder.name_prefix, i);
             let mut builder = thread::Builder::new().name(name);
             if let Some(size) = self.builder.stack_size {
                 builder = builder.stack_size(size)
             }
-            let local = Local::new(i + 1, local_queue, self.core.clone());
-            let thd = WorkerThread::new(local, runner);
+            let core = self.core.clone();
             threads.push(
                 builder
                     .spawn(move || {
+                        let local = Local::new(i + 1, queue_builder(), core);
+                        let thd = WorkerThread::new(local, runner);
                         thd.run();
                     })
                     .unwrap(),
             );
         }
         ThreadPool {
-            remote: Remote::new(self.core.clone()),
+            handle: Handle::new(self.core.clone()),
             threads: Mutex::new(threads),
         }
     }
@@ -183,9 +184,9 @@ impl Builder {
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
     /// to separate the construction and starting.
-    pub fn freeze<T>(&self) -> (Remote<T>, LazyBuilder<T>)
+    pub fn freeze<T>(&self) -> (Handle<T>, LazyBuilder<T>)
     where
-        T: TaskCell + Send,
+        T: TaskCell + Send + 'static,
     {
         self.freeze_with_queue(QueueType::SingleLevel)
     }
@@ -199,20 +200,21 @@ impl Builder {
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
     /// to separate the construction and starting.
-    pub fn freeze_with_queue<T>(&self, queue_type: QueueType) -> (Remote<T>, LazyBuilder<T>)
+    pub fn freeze_with_queue<T>(&self, queue_type: QueueType) -> (Handle<T>, LazyBuilder<T>)
     where
-        T: TaskCell + Send,
+        T: TaskCell + Send + 'static,
     {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
-        let (injector, local_queues) = queue::build(queue_type, self.sched_config.max_thread_count);
+        let (injector, local_queue_builders) =
+            queue::build(queue_type, self.sched_config.max_thread_count);
         let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));
 
         (
-            Remote::new(core.clone()),
+            Handle::new(core.clone()),
             LazyBuilder {
                 builder: self.clone(),
                 core,
-                local_queues,
+                local_queue_builders,
             },
         )
     }
