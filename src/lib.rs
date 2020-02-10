@@ -4,6 +4,7 @@
 
 //! Yatp is a thread pool that tries to be adaptive, responsive and generic.
 
+pub mod metrics;
 pub mod pool;
 pub mod queue;
 pub mod task;

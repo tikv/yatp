@@ -7,18 +7,20 @@
 //! used to collect necessary information.
 
 use super::{LocalQueueBuilder, Pop, TaskCell};
+use crate::metrics::*;
 use crate::pool::{Local, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use dashmap::DashMap;
+use prometheus::local::LocalIntCounter;
+use prometheus::{Gauge, IntCounter};
 use rand::prelude::*;
 use std::cell::Cell;
-use std::cmp;
-use std::iter;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::{f64, fmt, iter};
 
 const LEVEL_NUM: usize = 3;
 
@@ -27,20 +29,30 @@ const CHANCE_RATIO: u32 = 4;
 
 const DEFAULT_CLEANUP_OLD_MAP_INTERVAL: Duration = Duration::from_secs(10);
 
-/// When total elapsed time exceeds this value, it will try to adjust level
-/// chances and reset the total elapsed time.
-const ADJUST_CHANCE_INTERVAL: Duration = Duration::from_secs(1);
+/// When local total elapsed time exceeds this value in microseconds, the local
+/// metrics is flushed to the global atomic metrics and try to trigger chance
+/// adjustment.
+const FLUSH_LOCAL_THRESHOLD_US: i64 = 100_000;
+
+/// When the incremental total elapsed time exceeds this value, it will try to
+/// adjust level chances and reset the total elapsed time.
+const ADJUST_CHANCE_INTERVAL_US: i64 = 1_000_000;
 
 /// When the deviation between the target and the actual level 0 proportion
 /// exceeds this value, level chances need to be adjusted.
 const ADJUST_CHANCE_THRESHOLD: f64 = 0.05;
 
-// The chance values below are the numerators of fractions with u32::max_value()
-// as the denominator.
-const INIT_LEVEL0_CHANCE: u32 = 3_435_973_836; // 0.8
-const MIN_LEVEL0_CHANCE: u32 = 1 << 31; // 0.5
-const MAX_LEVEL0_CHANCE: u32 = 4_209_067_949; // 0.98
-const ADJUST_AMOUNT: u32 = (MAX_LEVEL0_CHANCE - MIN_LEVEL0_CHANCE) / 8; // 0.06
+/// The initial chance that a level 0 task is scheduled.
+///
+/// The value is not so important because the actual chance will be adjusted
+/// according to the real-time workload.
+const INIT_LEVEL0_CHANCE: f64 = 0.8;
+
+const MIN_LEVEL0_CHANCE: f64 = 0.5;
+const MAX_LEVEL0_CHANCE: f64 = 0.98;
+
+/// The amount that the level 0 chance is increased or decreased each time.
+const ADJUST_AMOUNT: f64 = 0.06;
 
 /// The injector of a multilevel task queue.
 pub(crate) struct TaskInjector<T> {
@@ -103,16 +115,16 @@ where
         }
         let mut rng = thread_rng();
         let mut need_retry = true;
+        let level0_chance = self.manager.level0_chance.get();
         while need_retry {
             need_retry = false;
-            let expected_level =
-                if rng.gen_ratio(self.manager.get_level0_chance(), u32::max_value()) {
-                    0
-                } else {
-                    (1..LEVEL_NUM - 1)
-                        .find(|_| rng.gen_ratio(CHANCE_RATIO, CHANCE_RATIO + 1))
-                        .unwrap_or(LEVEL_NUM - 1)
-                };
+            let expected_level = if rng.gen::<f64>() < level0_chance {
+                0
+            } else {
+                (1..LEVEL_NUM - 1)
+                    .find(|_| rng.gen_ratio(CHANCE_RATIO, CHANCE_RATIO + 1))
+                    .unwrap_or(LEVEL_NUM - 1)
+            };
             match self.level_injectors[expected_level].steal_batch_and_pop(&self.local_queue) {
                 Steal::Success(t) => return Some(into_pop(t, false)),
                 Steal::Retry => need_retry = true,
@@ -193,6 +205,8 @@ where
         MultilevelRunner {
             inner: self.inner.build(),
             manager: self.manager.clone(),
+            local_level0_elapsed_us: self.manager.level0_elapsed_us.local(),
+            local_total_elapsed_us: self.manager.total_elapsed_us.local(),
         }
     }
 }
@@ -204,6 +218,8 @@ where
 pub struct MultilevelRunner<R> {
     inner: R,
     manager: Arc<LevelManager>,
+    local_level0_elapsed_us: LocalIntCounter,
+    local_total_elapsed_us: LocalIntCounter,
 }
 
 impl<R, T> Runner for MultilevelRunner<R>
@@ -227,11 +243,15 @@ where
         if let Some(running_time) = running_time {
             running_time.inc_by(elapsed);
         }
+        let elapsed_us = elapsed.as_micros() as i64;
         if level == 0 {
-            self.manager.level0_elapsed.inc_by(elapsed);
+            self.local_level0_elapsed_us.inc_by(elapsed_us);
         }
-        let current_total = Duration::from_micros(self.manager.total_elapsed.inc_by(elapsed));
-        if current_total > ADJUST_CHANCE_INTERVAL {
+        self.local_total_elapsed_us.inc_by(elapsed_us);
+        let local_total = self.local_total_elapsed_us.get();
+        if local_total > FLUSH_LOCAL_THRESHOLD_US {
+            self.local_level0_elapsed_us.flush();
+            self.local_total_elapsed_us.flush();
             self.manager.maybe_adjust_chance();
         }
         res
@@ -251,14 +271,21 @@ where
 }
 
 struct LevelManager {
-    level0_elapsed: ElapsedTime,
-    total_elapsed: ElapsedTime,
+    level0_elapsed_us: IntCounter,
+    total_elapsed_us: IntCounter,
     task_elapsed_map: TaskElapsedMap,
     level_time_threshold: [Duration; LEVEL_NUM - 1],
-    level0_chance: AtomicU32,
+    level0_chance: Gauge,
     level0_proportion_target: f64,
     adjusting: AtomicBool,
+    last_level0_elapsed_us: Cell<i64>,
+    last_total_elapsed_us: Cell<i64>,
 }
+
+/// Safety: `last_level0_elapsed_us` and `last_total_elapsed_us` are only used
+/// in `maybe_adjust_chance`. `maybe_adjust_chance` is protected by `adjusting`
+/// so we can make sure only one thread can access them at the same time.
+unsafe impl Sync for LevelManager {}
 
 impl LevelManager {
     fn prepare_before_push<T>(&self, task_cell: &mut T)
@@ -286,57 +313,67 @@ impl LevelManager {
         extras.schedule_time = Some(now());
     }
 
-    fn get_level0_chance(&self) -> u32 {
-        self.level0_chance.load(SeqCst)
-    }
-
     fn maybe_adjust_chance(&self) {
         if self.adjusting.compare_and_swap(false, true, SeqCst) {
             return;
         }
         // The statistics may be not so accurate because we cannot load two
         // atomics at the same time.
-        let total = self.total_elapsed.0.load(SeqCst);
-        if Duration::from_micros(total) < ADJUST_CHANCE_INTERVAL {
-            // Another thread just adjusted the chances.
+        let total = self.total_elapsed_us.get();
+        let total_diff = total - self.last_total_elapsed_us.get();
+        if total_diff < ADJUST_CHANCE_INTERVAL_US {
+            // Needn't change it now.
+            self.adjusting.store(false, SeqCst);
             return;
         }
-        let total = self.total_elapsed.0.swap(0, SeqCst);
-        let level0 = self.level0_elapsed.0.swap(0, SeqCst);
-        let current_proportion = level0 as f64 / total as f64;
-        let diff = self.level0_proportion_target - current_proportion;
-        let level0_chance = self.level0_chance.load(SeqCst);
-        let new_chance = if diff > ADJUST_CHANCE_THRESHOLD {
-            cmp::min(
-                level0_chance.saturating_add(ADJUST_AMOUNT),
-                MAX_LEVEL0_CHANCE,
-            )
-        } else if diff < -ADJUST_CHANCE_THRESHOLD {
-            cmp::max(level0_chance - ADJUST_AMOUNT, MIN_LEVEL0_CHANCE)
+        let level0 = self.level0_elapsed_us.get();
+        let level0_diff = level0 - self.last_level0_elapsed_us.get();
+        self.last_total_elapsed_us.set(total);
+        self.last_level0_elapsed_us.set(level0);
+
+        let current_proportion = level0_diff as f64 / total_diff as f64;
+        let proportion_diff = self.level0_proportion_target - current_proportion;
+        let level0_chance = self.level0_chance.get();
+        let new_chance = if proportion_diff > ADJUST_CHANCE_THRESHOLD {
+            f64::min(level0_chance + ADJUST_AMOUNT, MAX_LEVEL0_CHANCE)
+        } else if proportion_diff < -ADJUST_CHANCE_THRESHOLD {
+            f64::max(level0_chance - ADJUST_AMOUNT, MIN_LEVEL0_CHANCE)
         } else {
             level0_chance
         };
-        self.level0_chance.store(new_chance, SeqCst);
+        self.level0_chance.set(new_chance);
         self.adjusting.store(false, SeqCst);
     }
 }
 
-#[derive(Default, Debug)]
-pub(crate) struct ElapsedTime(AtomicU64);
+pub(crate) struct ElapsedTime(IntCounter);
 
 impl ElapsedTime {
     fn as_duration(&self) -> Duration {
-        Duration::from_micros(self.0.load(SeqCst))
+        Duration::from_micros(self.0.get() as u64)
     }
 
-    fn inc_by(&self, t: Duration) -> u64 {
-        let micros = t.as_micros() as u64;
-        self.0.fetch_add(micros, SeqCst) + micros
+    fn inc_by(&self, t: Duration) {
+        self.0.inc_by(t.as_micros() as i64);
     }
 
     #[cfg(test)]
     fn from_duration(dur: Duration) -> Self {
-        ElapsedTime(AtomicU64::new(dur.as_micros() as u64))
+        let elapsed = ElapsedTime::default();
+        elapsed.inc_by(dur);
+        elapsed
+    }
+}
+
+impl Default for ElapsedTime {
+    fn default() -> ElapsedTime {
+        ElapsedTime(IntCounter::new("_", "_").unwrap())
+    }
+}
+
+impl fmt::Debug for ElapsedTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.as_duration())
     }
 }
 
@@ -416,11 +453,19 @@ impl TaskElapsedMap {
 
 /// The configurations of multilevel task queues.
 pub struct Config {
+    name: Option<String>,
     level_time_threshold: [Duration; LEVEL_NUM - 1],
     level0_proportion_target: f64,
 }
 
 impl Config {
+    /// Sets the name of the multilevel task queue. Metrics of multilevel
+    /// task queues are available if name is provided.
+    pub fn name(mut self, name: Option<impl Into<String>>) -> Self {
+        self.name = name.map(Into::into);
+        self
+    }
+
     /// Sets the time threshold of each level. It decides which level a task should be
     /// pushed into.
     #[inline]
@@ -445,6 +490,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
+            name: None,
             level_time_threshold: [Duration::from_millis(5), Duration::from_millis(100)],
             level0_proportion_target: 0.8,
         }
@@ -459,14 +505,36 @@ pub struct Builder {
 impl Builder {
     /// Creates a multilevel task queue builder from the config.
     pub fn new(config: Config) -> Builder {
+        let (level0_elapsed_us, total_elapsed_us, level0_chance) = if let Some(name) = config.name {
+            (
+                MULTILEVEL_LEVEL_ELAPSED
+                    .get_metric_with_label_values(&[&name, "0"])
+                    .unwrap(),
+                MULTILEVEL_LEVEL_ELAPSED
+                    .get_metric_with_label_values(&[&name, "total"])
+                    .unwrap(),
+                MULTILEVEL_LEVEL0_CHANCE
+                    .get_metric_with_label_values(&[&name])
+                    .unwrap(),
+            )
+        } else {
+            (
+                IntCounter::new("_", "_").unwrap(),
+                IntCounter::new("_", "_").unwrap(),
+                Gauge::new("_", "_").unwrap(),
+            )
+        };
+        level0_chance.set(INIT_LEVEL0_CHANCE);
         let manager = Arc::new(LevelManager {
-            level0_elapsed: Default::default(),
-            total_elapsed: Default::default(),
+            level0_elapsed_us,
+            total_elapsed_us,
             task_elapsed_map: Default::default(),
             level_time_threshold: config.level_time_threshold,
-            level0_chance: AtomicU32::new(INIT_LEVEL0_CHANCE),
+            level0_chance,
             level0_proportion_target: config.level0_proportion_target,
             adjusting: AtomicBool::new(false),
+            last_level0_elapsed_us: Cell::new(0),
+            last_total_elapsed_us: Cell::new(0),
         });
         Builder { manager }
     }
@@ -550,6 +618,7 @@ mod tests {
     use crate::pool::build_spawn;
     use crate::queue::Extras;
 
+    use std::sync::atomic::AtomicU64;
     use std::thread;
 
     #[test]
@@ -809,29 +878,29 @@ mod tests {
 
         // Level 0 running time is lower than expected, level0_chance should
         // increase.
-        let level0_chance_before = manager.get_level0_chance();
-        manager.level0_elapsed.inc_by(Duration::from_millis(500));
-        manager.total_elapsed.inc_by(Duration::from_millis(1500));
+        let level0_chance_before = manager.level0_chance.get();
+        manager.level0_elapsed_us.inc_by(500_000);
+        manager.total_elapsed_us.inc_by(1_500_000);
         manager.maybe_adjust_chance();
-        let level0_chance_after = manager.get_level0_chance();
+        let level0_chance_after = manager.level0_chance.get();
         assert!(level0_chance_before < level0_chance_after);
 
         // Level 0 running time is higher than expected, level0_chance should
         // decrease.
-        let level0_chance_before = manager.get_level0_chance();
-        manager.level0_elapsed.inc_by(Duration::from_millis(1400));
-        manager.total_elapsed.inc_by(Duration::from_millis(1500));
+        let level0_chance_before = manager.level0_chance.get();
+        manager.level0_elapsed_us.inc_by(1_400_000);
+        manager.total_elapsed_us.inc_by(1_500_000);
         manager.maybe_adjust_chance();
-        let level0_chance_after = manager.get_level0_chance();
+        let level0_chance_after = manager.level0_chance.get();
         assert!(level0_chance_before > level0_chance_after);
 
         // Level 0 running time is roughly equivalent to expected,
         // level0_chance should not change.
-        let level0_chance_before = manager.get_level0_chance();
-        manager.level0_elapsed.inc_by(Duration::from_millis(1210));
-        manager.total_elapsed.inc_by(Duration::from_millis(1500));
+        let level0_chance_before = manager.level0_chance.get();
+        manager.level0_elapsed_us.inc_by(1_210_000);
+        manager.total_elapsed_us.inc_by(1_500_000);
         manager.maybe_adjust_chance();
-        let level0_chance_after = manager.get_level0_chance();
+        let level0_chance_after = manager.level0_chance.get();
         assert_eq!(level0_chance_before, level0_chance_after);
     }
 }
