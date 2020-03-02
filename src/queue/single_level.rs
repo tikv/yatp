@@ -102,6 +102,19 @@ where
         }
         None
     }
+
+    pub fn has_tasks(&mut self) -> bool {
+        if !self.local_queue.is_empty() {
+            return true;
+        }
+        loop {
+            match self.injector.steal_batch(&self.local_queue) {
+                Steal::Success(()) => return true,
+                Steal::Empty => return false,
+                Steal::Retry => {}
+            }
+        }
+    }
 }
 
 /// Creates a single level work stealing task queue with `local_num` local queues.

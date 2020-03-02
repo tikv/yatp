@@ -175,7 +175,7 @@ thread_local! {
     static LOCAL: Cell<*mut Local<TaskCell>> = Cell::new(std::ptr::null_mut());
 }
 
-unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
+unsafe fn wake_task(task: Cow<'_, Arc<Task>>, remote: bool) {
     LOCAL.with(|ptr| {
         if ptr.get().is_null() {
             // It's out of polling process, has to be spawn to global queue.
@@ -186,7 +186,7 @@ unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
                 .as_ref()
                 .expect("remote should exist!!!")
                 .spawn(TaskCell(task.clone().into_owned()));
-        } else if reschedule {
+        } else if remote {
             // It's requested explicitly to schedule to global queue.
             (*ptr.get()).spawn_remote(TaskCell(task.into_owned()));
         } else {
@@ -243,7 +243,7 @@ impl crate::pool::Runner for Runner {
     type TaskCell = TaskCell;
 
     fn handle(&mut self, local: &mut Local<TaskCell>, task_cell: TaskCell) -> bool {
-        let _scope = Scope::new(local);
+        let scope = Scope::new(local);
         let task = task_cell.0;
         unsafe {
             let waker = ManuallyDrop::new(waker(&*task));
@@ -268,7 +268,9 @@ impl crate::pool::Runner for Runner {
                     Ok(_) => return false,
                     Err(NOTIFIED) => {
                         let need_reschedule = NEED_RESCHEDULE.with(|r| r.replace(false));
-                        if repoll_times >= self.repoll_limit || need_reschedule {
+                        if (repoll_times >= self.repoll_limit || need_reschedule)
+                            && scope.0.has_tasks()
+                        {
                             wake_task(Cow::Owned(task), need_reschedule);
                             return false;
                         } else {

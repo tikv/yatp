@@ -253,6 +253,10 @@ impl<T: TaskCell + Send> Local<T> {
             ParkResult::TimedOut => unreachable!(),
         }
     }
+
+    pub(crate) fn has_tasks(&mut self) -> bool {
+        self.local_queue.has_tasks()
+    }
 }
 
 /// Building remotes and locals from the given queue and configuration.

@@ -106,6 +106,13 @@ impl<T: TaskCell + Send> LocalQueue<T> {
             LocalQueueInner::Multilevel(_) => Extras::multilevel_default(),
         }
     }
+
+    pub fn has_tasks(&mut self) -> bool {
+        match &mut self.0 {
+            LocalQueueInner::SingleLevel(q) => q.has_tasks(),
+            LocalQueueInner::Multilevel(q) => q.has_tasks(),
+        }
+    }
 }
 
 /// Supported available queues.
