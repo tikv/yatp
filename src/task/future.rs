@@ -175,7 +175,7 @@ thread_local! {
     static LOCAL: Cell<*mut Local<TaskCell>> = Cell::new(std::ptr::null_mut());
 }
 
-unsafe fn wake_task(task: Cow<'_, Arc<Task>>, remote: bool) {
+unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
     LOCAL.with(|ptr| {
         if ptr.get().is_null() {
             // It's out of polling process, has to be spawn to global queue.
@@ -186,7 +186,7 @@ unsafe fn wake_task(task: Cow<'_, Arc<Task>>, remote: bool) {
                 .as_ref()
                 .expect("remote should exist!!!")
                 .spawn(TaskCell(task.clone().into_owned()));
-        } else if remote {
+        } else if reschedule {
             // It's requested explicitly to schedule to global queue.
             (*ptr.get()).spawn_remote(TaskCell(task.into_owned()));
         } else {
@@ -460,8 +460,11 @@ mod tests {
         assert_eq!(res_rx.recv().unwrap(), 2);
     }
 
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
     #[test]
     fn test_repoll_limit() {
+        let _guard = fail::FailScenario::setup();
+        fail::cfg("need-preempt", "return(true)").unwrap();
         let mut local = MockLocal::new(Runner::new(2));
         let (res_tx, res_rx) = mpsc::channel();
 
@@ -486,8 +489,11 @@ mod tests {
         assert_eq!(res_rx.recv().unwrap(), 4);
     }
 
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
     #[test]
     fn test_reschedule() {
+        let _guard = fail::FailScenario::setup();
+        fail::cfg("need-preempt", "return(true)").unwrap();
         let mut local = MockLocal::default();
         let (res_tx, res_rx) = mpsc::channel();
 
@@ -506,5 +512,25 @@ mod tests {
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 2);
         assert_eq!(res_rx.recv().unwrap(), 3);
+    }
+
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
+    #[test]
+    fn test_no_preemptive_task() {
+        let _guard = fail::FailScenario::setup();
+        fail::cfg("need-preempt", "return(false)").unwrap();
+        let mut local = MockLocal::default();
+        let (res_tx, res_rx) = mpsc::channel();
+
+        let fut = async move {
+            res_tx.send(1).unwrap();
+            reschedule().await;
+            res_tx.send(2).unwrap();
+        };
+        local.remote.spawn(fut);
+
+        local.handle_once();
+        assert_eq!(res_rx.recv().unwrap(), 1);
+        assert_eq!(res_rx.recv().unwrap(), 2);
     }
 }

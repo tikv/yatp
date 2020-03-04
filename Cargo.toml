@@ -15,11 +15,15 @@ crossbeam-deque = "0.7"
 dashmap = "1.2.0"
 rand = "0.7"
 lazy_static = "1"
+fail = "0.3"
 
 [dependencies.prometheus]
 # FIXME: Use crates-io version when rust-prometheus 0.8 is released
 git = "https://github.com/tikv/rust-prometheus.git"
 rev = "d919ccd35976b9b84b8d03c07138c1cc05a36087"
+
+[features]
+failpoints = ["fail/failpoints"]
 
 [dev-dependencies]
 criterion = "0.3"
