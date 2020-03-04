@@ -103,7 +103,7 @@ where
         None
     }
 
-    pub fn has_tasks(&mut self) -> bool {
+    pub fn has_tasks_or_pull(&mut self) -> bool {
         if !self.local_queue.is_empty() {
             return true;
         }

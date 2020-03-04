@@ -117,6 +117,13 @@ impl<T> QueueCore<T> {
             }
         }
     }
+
+    /// Returns whether all threads in the pool is working.
+    ///
+    /// It's not necessarily accurate.
+    pub fn busy_hint(&self) -> bool {
+        self.active_workers.load(Ordering::Relaxed) == self.config.max_thread_count
+    }
 }
 
 impl<T: TaskCell + Send> QueueCore<T> {
@@ -254,8 +261,15 @@ impl<T: TaskCell + Send> Local<T> {
         }
     }
 
-    pub(crate) fn has_tasks(&mut self) -> bool {
-        self.local_queue.has_tasks()
+    /// Returns whether there are preemptive tasks to run.
+    ///
+    /// If the pool is not busy, other tasks should not preempt the current running task.
+    pub(crate) fn need_preempt(&mut self) -> bool {
+        if self.core.busy_hint() {
+            self.local_queue.has_tasks_or_pull()
+        } else {
+            false
+        }
     }
 }
 

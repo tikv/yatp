@@ -269,7 +269,7 @@ impl crate::pool::Runner for Runner {
                     Err(NOTIFIED) => {
                         let need_reschedule = NEED_RESCHEDULE.with(|r| r.replace(false));
                         if (repoll_times >= self.repoll_limit || need_reschedule)
-                            && scope.0.has_tasks()
+                            && scope.0.need_preempt()
                         {
                             wake_task(Cow::Owned(task), need_reschedule);
                             return false;
