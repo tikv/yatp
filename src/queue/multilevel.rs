@@ -163,6 +163,29 @@ where
         }
         None
     }
+
+    pub fn has_tasks_or_pull(&mut self) -> bool {
+        if !self.local_queue.is_empty() {
+            return true;
+        }
+
+        let mut rng = thread_rng();
+        let level0_chance = self.manager.level0_chance.get();
+        loop {
+            let expected_level = if rng.gen::<f64>() < level0_chance {
+                0
+            } else {
+                (1..LEVEL_NUM - 1)
+                    .find(|_| rng.gen_ratio(CHANCE_RATIO, CHANCE_RATIO + 1))
+                    .unwrap_or(LEVEL_NUM - 1)
+            };
+            match self.level_injectors[expected_level].steal_batch(&self.local_queue) {
+                Steal::Success(()) => return true,
+                Steal::Empty => return false,
+                Steal::Retry => {}
+            }
+        }
+    }
 }
 
 /// The runner builder for multilevel task queues.

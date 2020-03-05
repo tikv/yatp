@@ -6,6 +6,7 @@
 
 use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
+use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -116,6 +117,13 @@ impl<T> QueueCore<T> {
                 Err(n) => cnt = n,
             }
         }
+    }
+
+    /// Returns whether all threads in the pool is working.
+    ///
+    /// It's not necessarily accurate.
+    pub fn busy_hint(&self) -> bool {
+        self.active_workers.load(Ordering::Relaxed) == self.config.max_thread_count
     }
 }
 
@@ -251,6 +259,18 @@ impl<T: TaskCell + Send> Local<T> {
                 task
             }
             ParkResult::TimedOut => unreachable!(),
+        }
+    }
+
+    /// Returns whether there are preemptive tasks to run.
+    ///
+    /// If the pool is not busy, other tasks should not preempt the current running task.
+    pub(crate) fn need_preempt(&mut self) -> bool {
+        fail_point!("need-preempt", |r| { r.unwrap().parse().unwrap() });
+        if self.core.busy_hint() {
+            self.local_queue.has_tasks_or_pull()
+        } else {
+            false
         }
     }
 }

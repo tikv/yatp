@@ -243,7 +243,7 @@ impl crate::pool::Runner for Runner {
     type TaskCell = TaskCell;
 
     fn handle(&mut self, local: &mut Local<TaskCell>, task_cell: TaskCell) -> bool {
-        let _scope = Scope::new(local);
+        let scope = Scope::new(local);
         let task = task_cell.0;
         unsafe {
             let waker = ManuallyDrop::new(waker(&*task));
@@ -268,7 +268,9 @@ impl crate::pool::Runner for Runner {
                     Ok(_) => return false,
                     Err(NOTIFIED) => {
                         let need_reschedule = NEED_RESCHEDULE.with(|r| r.replace(false));
-                        if repoll_times >= self.repoll_limit || need_reschedule {
+                        if (repoll_times >= self.repoll_limit || need_reschedule)
+                            && scope.0.need_preempt()
+                        {
                             wake_task(Cow::Owned(task), need_reschedule);
                             return false;
                         } else {
@@ -458,8 +460,11 @@ mod tests {
         assert_eq!(res_rx.recv().unwrap(), 2);
     }
 
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
     #[test]
     fn test_repoll_limit() {
+        let _guard = fail::FailScenario::setup();
+        fail::cfg("need-preempt", "return(true)").unwrap();
         let mut local = MockLocal::new(Runner::new(2));
         let (res_tx, res_rx) = mpsc::channel();
 
@@ -484,8 +489,11 @@ mod tests {
         assert_eq!(res_rx.recv().unwrap(), 4);
     }
 
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
     #[test]
     fn test_reschedule() {
+        let _guard = fail::FailScenario::setup();
+        fail::cfg("need-preempt", "return(true)").unwrap();
         let mut local = MockLocal::default();
         let (res_tx, res_rx) = mpsc::channel();
 
@@ -504,5 +512,25 @@ mod tests {
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 2);
         assert_eq!(res_rx.recv().unwrap(), 3);
+    }
+
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
+    #[test]
+    fn test_no_preemptive_task() {
+        let _guard = fail::FailScenario::setup();
+        fail::cfg("need-preempt", "return(false)").unwrap();
+        let mut local = MockLocal::default();
+        let (res_tx, res_rx) = mpsc::channel();
+
+        let fut = async move {
+            res_tx.send(1).unwrap();
+            reschedule().await;
+            res_tx.send(2).unwrap();
+        };
+        local.remote.spawn(fut);
+
+        local.handle_once();
+        assert_eq!(res_rx.recv().unwrap(), 1);
+        assert_eq!(res_rx.recv().unwrap(), 2);
     }
 }
