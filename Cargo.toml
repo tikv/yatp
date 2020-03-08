@@ -9,18 +9,14 @@ license = "Apache-2.0"
 repository = "https://github.com/tikv/yatp/"
 
 [dependencies]
+crossbeam-deque = "0.7"
+dashmap = "3.5.1"
+fail = "0.3"
+lazy_static = "1"
 num_cpus = "1.0"
 parking_lot_core = "0.7"
-crossbeam-deque = "0.7"
-dashmap = "1.2.0"
+prometheus = "0.8"
 rand = "0.7"
-lazy_static = "1"
-fail = "0.3"
-
-[dependencies.prometheus]
-# FIXME: Use crates-io version when rust-prometheus 0.8 is released
-git = "https://github.com/tikv/rust-prometheus.git"
-rev = "d919ccd35976b9b84b8d03c07138c1cc05a36087"
 
 [features]
 failpoints = ["fail/failpoints"]
