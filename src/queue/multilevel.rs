@@ -419,8 +419,8 @@ impl TaskElapsedMap {
                 new_map.insert(key, v.clone());
                 v.clone()
             }
-            _ => {
-                let v = new_map.get_or_insert_with(&key, Default::default);
+            None => {
+                let v = new_map.entry(key).or_default();
                 v.clone()
             }
         };
