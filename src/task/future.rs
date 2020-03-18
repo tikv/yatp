@@ -340,7 +340,7 @@ mod tests {
 
         /// Run `Runner::handle` once.
         fn handle_once(&mut self) {
-            if let Some(t) = self.locals[0].pop() {
+            if let Some(t) = self.locals[0].pop(true) {
                 let runner = self.runner.clone();
                 runner.borrow_mut().handle(&mut self.locals[0], t.task_cell);
             }

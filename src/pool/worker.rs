@@ -25,7 +25,7 @@ where
         // Wait some time before going to sleep, which is more expensive.
         let mut spin = SpinWait::new();
         loop {
-            if let Some(t) = self.local.pop() {
+            if let Some(t) = self.local.pop(false) {
                 return Some(t);
             }
             if !spin.spin() {
