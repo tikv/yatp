@@ -25,6 +25,8 @@ where
         // Wait some time before going to sleep, which is more expensive.
         let mut spin = SpinWait::new();
         loop {
+            // By default we don't steal other workers to reduce the cost of pop.
+            // But we will always try to steal other workers before going to sleep.
             if let Some(t) = self.local.pop(false) {
                 return Some(t);
             }

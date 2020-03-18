@@ -224,8 +224,8 @@ impl<T: TaskCell + Send> Local<T> {
         &self.core
     }
 
-    pub(crate) fn pop(&mut self, steal_others: bool) -> Option<Pop<T>> {
-        self.local_queue.pop(steal_others)
+    pub(crate) fn pop(&mut self, steal_workers: bool) -> Option<Pop<T>> {
+        self.local_queue.pop(steal_workers)
     }
 
     /// Pops a task from the queue.
@@ -244,6 +244,7 @@ impl<T: TaskCell + Send> Local<T> {
                     if !self.core.mark_sleep() {
                         return false;
                     }
+                    // Steal other workers so we don't sleep while leaving other workers busy.
                     task = self.local_queue.pop(true);
                     task.is_none()
                 },
