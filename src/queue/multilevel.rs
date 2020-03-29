@@ -12,6 +12,7 @@ use crate::pool::{Local, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use dashmap::DashMap;
+use fail::fail_point;
 use prometheus::local::LocalIntCounter;
 use prometheus::{Gauge, IntCounter};
 use rand::prelude::*;
@@ -414,17 +415,23 @@ impl TaskElapsedMap {
         if let Some(v) = new_map.get(&key) {
             return v.clone();
         }
+        fail_point!("between-read-new-and-read-old");
         let elapsed = match old_map.get(&key) {
             Some(v) => {
-                new_map.insert(key, v.clone());
-                v.clone()
+                let v2 = v.clone();
+                drop(v);
+                fail_point!("between-get-from-old-and-insert-into-new");
+                new_map.insert(key, v2.clone());
+                v2
             }
             None => {
+                fail_point!("before-insert-new");
                 let v = new_map.entry(key).or_default();
                 v.clone()
             }
         };
         TLS_LAST_CLEANUP_TIME.with(|t| {
+            fail_point!("cleanup-in-get-elapsed", |_| ());
             if recent().saturating_duration_since(t.get()) > self.cleanup_interval {
                 self.maybe_cleanup();
             }
@@ -629,6 +636,7 @@ mod tests {
     use crate::queue::Extras;
 
     use std::sync::atomic::AtomicU64;
+    use std::sync::mpsc;
     use std::thread;
 
     #[test]
@@ -905,5 +913,58 @@ mod tests {
         manager.maybe_adjust_chance();
         let level0_chance_after = manager.level0_chance.get();
         assert_eq!(level0_chance_before, level0_chance_after);
+    }
+
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
+    #[test]
+    fn test_get_elapsed_deadlock() {
+        let _guard = fail::FailScenario::setup();
+        fail::cfg("between-get-from-old-and-insert-into-new", "delay(500)").unwrap();
+        fail::cfg("before-insert-new", "delay(400)").unwrap();
+        let map = Arc::new(TaskElapsedMap::new(Duration::default()));
+
+        let map2 = map.clone();
+        thread::spawn(move || {
+            // t = 0, new = 0, old = 1, read new fail, read old fail
+            // t = 400, insert into new (0)
+            map2.get_elapsed(1);
+        });
+
+        let map2 = map.clone();
+        thread::spawn(move || {
+            // t = 0, new = 0, old = 1, read new fail
+            // t = 350, read old (1) get
+            // t = 850, insert into new (0)
+            thread::sleep(Duration::from_millis(50));
+            fail::cfg("between-read-new-and-read-old", "delay(300)").unwrap();
+            map2.get_elapsed(1);
+        });
+
+        // t = 100, new = 0, old = 1, clear old (1)
+        // t = 100, swap index, new = 1, old = 0
+        thread::sleep(Duration::from_millis(100));
+        now();
+        map.maybe_cleanup();
+
+        let map3 = map.clone();
+        thread::spawn(move || {
+            // t = 200, new = 1, old = 0, read new fail
+            // t = 200, read old fail, insert into 1
+            thread::sleep(Duration::from_millis(200));
+            fail::remove("between-read-new-and-read-old");
+            fail::remove("before-insert-new");
+            map3.get_elapsed(1);
+        });
+
+        let map4 = map.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            // t = 150, new = 1, old = 0, read new get none
+            // t = 450, read old (0) get
+            thread::sleep(Duration::from_millis(150));
+            map4.get_elapsed(1);
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 }
