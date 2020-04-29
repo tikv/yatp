@@ -17,7 +17,7 @@ pub use self::spawn::{build_spawn, Local, Remote};
 use crate::queue::{TaskCell, WithExtras};
 use std::mem;
 use std::sync::Mutex;
-use std::thread::JoinHandle;
+use std::thread::{self, JoinHandle};
 
 /// A generic thread pool.
 pub struct ThreadPool<T: TaskCell + Send> {
@@ -39,8 +39,11 @@ impl<T: TaskCell + Send> ThreadPool<T> {
     pub fn shutdown(&self) {
         self.remote.stop();
         let mut threads = mem::replace(&mut *self.threads.lock().unwrap(), Vec::new());
+        let curr_id = thread::current().id();
         for j in threads.drain(..) {
-            j.join().unwrap();
+            if curr_id != j.thread().id() {
+                j.join().unwrap();
+            }
         }
     }
 
