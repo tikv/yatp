@@ -17,7 +17,7 @@ use prometheus::local::LocalIntCounter;
 use prometheus::{Gauge, IntCounter};
 use rand::prelude::*;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{f64, fmt, iter};
@@ -298,12 +298,12 @@ impl LevelManager {
     {
         let extras = task_cell.mut_extras();
         let task_id = extras.task_id;
-        let running_time = extras
-            .running_time
-            .get_or_insert_with(|| self.task_elapsed_map.get_elapsed(task_id));
         let current_level = match extras.fixed_level {
             Some(level) => level,
             None => {
+                let running_time = extras
+                    .running_time
+                    .get_or_insert_with(|| self.task_elapsed_map.get_elapsed(task_id));
                 let running_time = running_time.as_duration();
                 self.level_time_threshold
                     .iter()
@@ -350,15 +350,15 @@ impl LevelManager {
     }
 }
 
-pub(crate) struct ElapsedTime(IntCounter);
+pub(crate) struct ElapsedTime(AtomicU64);
 
 impl ElapsedTime {
     fn as_duration(&self) -> Duration {
-        Duration::from_micros(self.0.get() as u64)
+        Duration::from_micros(self.0.load(Relaxed) as u64)
     }
 
     fn inc_by(&self, t: Duration) {
-        self.0.inc_by(t.as_micros() as i64);
+        self.0.fetch_add(t.as_micros() as u64, Relaxed);
     }
 
     #[cfg(test)]
@@ -371,7 +371,7 @@ impl ElapsedTime {
 
 impl Default for ElapsedTime {
     fn default() -> ElapsedTime {
-        ElapsedTime(IntCounter::new("_", "_").unwrap())
+        ElapsedTime(AtomicU64::new(0))
     }
 }
 
