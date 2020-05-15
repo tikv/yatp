@@ -53,10 +53,9 @@ mod yatp_future {
     use std::sync::atomic::*;
     use std::sync::*;
     use tokio::sync::oneshot;
+    use yatp::task::future::TaskCell;
 
-    pub fn ping_pong(b: &mut Bencher<'_>, ping_count: usize) {
-        let pool = yatp::Builder::new("ping_pong").build_future_pool();
-
+    fn ping_pong(b: &mut Bencher<'_>, pool: yatp::ThreadPool<TaskCell>, ping_count: usize) {
         let (done_tx, done_rx) = mpsc::sync_channel(1000);
         let rem = Arc::new(AtomicUsize::new(0));
 
@@ -95,6 +94,16 @@ mod yatp_future {
 
             done_rx.recv().unwrap();
         });
+    }
+
+    pub fn ping_pong_single_level(b: &mut Bencher<'_>, ping_count: usize) {
+        let pool = yatp::Builder::new("ping_pong").build_future_pool();
+        ping_pong(b, pool, ping_count)
+    }
+
+    pub fn ping_pong_multilevel(b: &mut Bencher<'_>, ping_count: usize) {
+        let pool = yatp::Builder::new("ping_pong").build_multilevel_future_pool();
+        ping_pong(b, pool, ping_count)
     }
 }
 
@@ -201,11 +210,16 @@ pub fn ping_pong(b: &mut Criterion) {
     let mut group = b.benchmark_group("ping_pong");
     for i in &[256, 512, 1024] {
         group.bench_with_input(BenchmarkId::new("yatp::future", i), i, |b, i| {
-            yatp_future::ping_pong(b, *i)
+            yatp_future::ping_pong_single_level(b, *i)
         });
         group.bench_with_input(BenchmarkId::new("yatp::callback", i), i, |b, i| {
             yatp_callback::ping_pong(b, *i)
         });
+        group.bench_with_input(
+            BenchmarkId::new("yatp::future::multilevel", i),
+            i,
+            |b, i| yatp_future::ping_pong_multilevel(b, *i),
+        );
         group.bench_with_input(BenchmarkId::new("tokio", i), i, |b, i| {
             tokio::ping_pong(b, *i)
         });

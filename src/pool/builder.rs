@@ -3,7 +3,7 @@
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
 use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
-use crate::queue::{self, LocalQueue, QueueType, TaskCell, multilevel};
+use crate::queue::{self, multilevel, LocalQueue, QueueType, TaskCell};
 use crate::task::{callback, future};
 use std::sync::{Arc, Mutex};
 use std::thread;
