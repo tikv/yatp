@@ -62,11 +62,11 @@ mod yatp_callback {
 mod yatp_future {
     use criterion::*;
     use std::sync::mpsc;
+    use yatp::task::future::TaskCell;
 
-    pub fn yield_many(b: &mut Bencher<'_>, yield_count: usize) {
+    fn yield_many(b: &mut Bencher<'_>, pool: yatp::ThreadPool<TaskCell>, yield_count: usize) {
         let tasks = super::TASKS_PER_CPU * num_cpus::get();
         let (tx, rx) = mpsc::sync_channel(tasks);
-        let pool = yatp::Builder::new("yield_many").build_future_pool();
 
         b.iter(move || {
             for _ in 0..tasks {
@@ -83,6 +83,16 @@ mod yatp_future {
                 let _ = rx.recv().unwrap();
             }
         });
+    }
+
+    pub fn yield_many_single_level(b: &mut Bencher<'_>, yield_count: usize) {
+        let pool = yatp::Builder::new("yield_many").build_future_pool();
+        yield_many(b, pool, yield_count)
+    }
+
+    pub fn yield_many_multilevel(b: &mut Bencher<'_>, yield_count: usize) {
+        let pool = yatp::Builder::new("yield_many").build_multilevel_future_pool();
+        yield_many(b, pool, yield_count)
     }
 }
 
@@ -146,13 +156,18 @@ mod async_std {
 
 pub fn yield_many(b: &mut Criterion) {
     let mut group = b.benchmark_group("yield_many");
-    for i in &[100, 400, 700, 1000] {
+    for i in &[256, 512, 1024] {
         group.bench_with_input(BenchmarkId::new("yatp::future", i), i, |b, i| {
-            yatp_future::yield_many(b, *i)
+            yatp_future::yield_many_single_level(b, *i)
         });
         group.bench_with_input(BenchmarkId::new("yatp::callback", i), i, |b, i| {
             yatp_callback::yield_many(b, *i)
         });
+        group.bench_with_input(
+            BenchmarkId::new("yatp::future::multilevel", i),
+            i,
+            |b, i| yatp_future::yield_many_multilevel(b, *i),
+        );
         group.bench_with_input(BenchmarkId::new("tokio", i), i, |b, i| {
             tokio::yield_many(b, *i)
         });
