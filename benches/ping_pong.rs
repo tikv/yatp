@@ -199,7 +199,7 @@ mod async_std {
 
 pub fn ping_pong(b: &mut Criterion) {
     let mut group = b.benchmark_group("ping_pong");
-    for i in &[100, 400, 700, 1000] {
+    for i in &[256, 512, 1024] {
         group.bench_with_input(BenchmarkId::new("yatp::future", i), i, |b, i| {
             yatp_future::ping_pong(b, *i)
         });

@@ -146,7 +146,7 @@ mod async_std {
 
 pub fn yield_many(b: &mut Criterion) {
     let mut group = b.benchmark_group("yield_many");
-    for i in &[100, 400, 700, 1000] {
+    for i in &[256, 512, 1024] {
         group.bench_with_input(BenchmarkId::new("yatp::future", i), i, |b, i| {
             yatp_future::yield_many(b, *i)
         });
