@@ -24,18 +24,18 @@ where
 {
     #[inline]
     fn pop(&mut self) -> Option<Pop<T>> {
-        self.local.core().ensure_workers(self.local.id);
         let idling = self.local.core().mark_idling();
         let mut counter = 0;
         while idling {
             if let Some(t) = self.local.pop() {
                 self.local.core().unmark_idling();
+                self.local.core().ensure_workers(self.local.id);
                 return Some(t);
             }
             counter += 1;
             if counter < 3 {
                 thread::yield_now();
-            } else if counter < 100 {
+            } else if counter < 10 {
                 thread::sleep(Duration::from_micros(10));
             } else {
                 self.local.core().unmark_idling();

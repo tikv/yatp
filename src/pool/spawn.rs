@@ -67,6 +67,8 @@ pub(crate) struct QueueCore<T> {
     workers_info: AtomicU64,
     active_countdown: AtomicU8,
     backup_countdown: AtomicU8,
+    wake_up_backup: AtomicU64,
+    wake_up_active: AtomicU64,
     idling: AtomicBool,
     config: SchedConfig,
 }
@@ -79,6 +81,8 @@ impl<T> QueueCore<T> {
             workers_info: AtomicU64::new(((thread_count << 17) | (thread_count << 1)) as u64),
             active_countdown: AtomicU8::new(0),
             backup_countdown: AtomicU8::new(0),
+            wake_up_backup: AtomicU64::new(0),
+            wake_up_active: AtomicU64::new(0),
             idling: AtomicBool::new(false),
             config,
         }
@@ -93,16 +97,21 @@ impl<T> QueueCore<T> {
         if workers_info.is_shutdown() {
             return;
         }
-        if self.idling.load(Ordering::SeqCst) {
-            return;
-        }
-        let mut value = self.active_countdown.load(Ordering::Relaxed);
+        // if source == 0 {
+        //     println!("backup: {}", workers_info.backup_count());
+        // }
         if workers_info.active_count() < self.config.min_thread_count {
             self.unpark_one(true, source);
-        } else if source != 0 && workers_info.running_count() == workers_info.active_count() {
+        } else if workers_info.running_count() < self.config.min_thread_count {
+            self.unpark_one(false, source);
+        } else if source != 0 {
+            let idling = self.idling.load(Ordering::SeqCst);
+            let set_bit =
+                (workers_info.running_count() == workers_info.active_count() && !idling) as u8;
+            let mut value = self.active_countdown.load(Ordering::Relaxed);
             loop {
                 let unpark = value == 0xFF;
-                let new_value = if unpark { 0 } else { (value << 1) | 1 };
+                let new_value = if unpark { 0 } else { (value << 1) | set_bit };
                 match self.active_countdown.compare_exchange_weak(
                     value,
                     new_value,
@@ -120,8 +129,9 @@ impl<T> QueueCore<T> {
                     }
                 }
             }
-        } else {
-            self.unpark_one(false, source);
+            if workers_info.running_count() < workers_info.active_count() && !idling {
+                self.unpark_one(false, source);
+            }
         }
         // if workers_info.running_count() == workers_info.active_count()
         //     && workers_info.backup_count() > 0
@@ -165,6 +175,14 @@ impl<T> QueueCore<T> {
         }
     }
 
+    pub fn mark_idling(&self) -> bool {
+        !self.idling.compare_and_swap(false, true, Ordering::SeqCst)
+    }
+
+    pub fn unmark_idling(&self) {
+        self.idling.store(false, Ordering::SeqCst);
+    }
+
     /// Sets the shutdown bit and notify all threads.
     ///
     /// `source` is used to trace who triggers the action.
@@ -179,14 +197,6 @@ impl<T> QueueCore<T> {
     /// Checks if the thread pool is shutting down.
     pub fn is_shutdown(&self) -> bool {
         self.workers_info.load(Ordering::SeqCst).is_shutdown()
-    }
-
-    pub fn mark_idling(&self) -> bool {
-        !self.idling.compare_and_swap(false, true, Ordering::SeqCst)
-    }
-
-    pub fn unmark_idling(&self) {
-        self.idling.store(false, Ordering::SeqCst);
     }
 
     /// Marks the current thread in sleep state.
@@ -217,6 +227,7 @@ impl<T> QueueCore<T> {
                 Ok(_) => {
                     let down =
                         (workers_info.running_count() + 1 < workers_info.active_count()) as u8;
+                    // println!("down: {}", down);
                     // println!(
                     //     "running: {}, active: {}, backup: {}, down: {}",
                     //     workers_info.running_count(),
@@ -242,6 +253,11 @@ impl<T> QueueCore<T> {
 
     /// Marks current thread as woken up states.
     pub fn mark_woken(&self, backup: bool) {
+        if backup {
+            self.wake_up_backup.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.wake_up_active.fetch_add(1, Ordering::SeqCst);
+        }
         let mut workers_info = self.workers_info.load(Ordering::SeqCst);
         loop {
             let new_info = if backup {
@@ -288,6 +304,16 @@ impl<T: TaskCell + Send> QueueCore<T> {
 
     fn default_extras(&self) -> Extras {
         self.global_queue.default_extras()
+    }
+}
+
+impl<T> Drop for QueueCore<T> {
+    fn drop(&mut self) {
+        println!(
+            "wake active: {}, wake backup: {}",
+            self.wake_up_active.load(Ordering::SeqCst),
+            self.wake_up_backup.load(Ordering::SeqCst)
+        );
     }
 }
 
