@@ -8,7 +8,7 @@ use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// An usize is used to trace the threads that are working actively.
@@ -66,6 +66,7 @@ pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     workers_info: AtomicU64,
     backup_countdown: AtomicU8,
+    idling: AtomicBool,
     config: SchedConfig,
 }
 
@@ -76,6 +77,7 @@ impl<T> QueueCore<T> {
             global_queue,
             workers_info: AtomicU64::new(((thread_count << 17) | (thread_count << 1)) as u64),
             backup_countdown: AtomicU8::new(8),
+            idling: AtomicBool::new(false),
             config,
         }
     }
@@ -89,8 +91,10 @@ impl<T> QueueCore<T> {
         if workers_info.is_shutdown() {
             return;
         }
+        let idling = self.idling.load(Ordering::SeqCst);
         if workers_info.running_count() == workers_info.active_count()
             && workers_info.backup_count() > 0
+            && !idling
         {
             // println!(
             //     "unpark backup, running: {}, active: {}, backup: {}",
@@ -98,8 +102,9 @@ impl<T> QueueCore<T> {
             //     workers_info.active_count(),
             //     workers_info.backup_count()
             // );
+            // println!("unpark backup");
             self.unpark_one(true, source);
-        } else {
+        } else if !idling {
             // println!(
             //     "unpark active, running: {}, active: {}, backup: {}",
             //     workers_info.running_count(),
@@ -144,6 +149,14 @@ impl<T> QueueCore<T> {
     /// Checks if the thread pool is shutting down.
     pub fn is_shutdown(&self) -> bool {
         self.workers_info.load(Ordering::SeqCst).is_shutdown()
+    }
+
+    pub fn mark_idling(&self) -> bool {
+        !self.idling.compare_and_swap(false, true, Ordering::SeqCst)
+    }
+
+    pub fn unmark_idling(&self) {
+        self.idling.store(false, Ordering::SeqCst);
     }
 
     /// Marks the current thread in sleep state.
