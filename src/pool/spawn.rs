@@ -432,6 +432,7 @@ impl<T: TaskCell + Send> Local<T> {
         match res {
             ParkResult::Unparked(_) | ParkResult::Invalid => {
                 self.core.mark_woken(backup);
+                self.core.ensure_workers(id);
                 task
             }
             ParkResult::TimedOut => unreachable!(),
