@@ -96,21 +96,23 @@ impl<T> QueueCore<T> {
             && workers_info.backup_count() > 0
             && !idling
         {
-            // println!(
-            //     "unpark backup, running: {}, active: {}, backup: {}",
-            //     workers_info.running_count(),
-            //     workers_info.active_count(),
-            //     workers_info.backup_count()
-            // );
+            eprintln!(
+                "{:?} unpark backup, running: {}, active: {}, backup: {}",
+                std::time::SystemTime::now(),
+                workers_info.running_count(),
+                workers_info.active_count(),
+                workers_info.backup_count()
+            );
             // println!("unpark backup");
             self.unpark_one(true, source);
         } else if !idling {
-            // println!(
-            //     "unpark active, running: {}, active: {}, backup: {}",
-            //     workers_info.running_count(),
-            //     workers_info.active_count(),
-            //     workers_info.backup_count()
-            // );
+            eprintln!(
+                "{:?} unpark active, running: {}, active: {}, backup: {}",
+                std::time::SystemTime::now(),
+                workers_info.running_count(),
+                workers_info.active_count(),
+                workers_info.backup_count()
+            );
             self.unpark_one(false, source);
         }
     }
@@ -185,7 +187,7 @@ impl<T> QueueCore<T> {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => {
-                    if workers_info.running_count() + 1 < workers_info.active_count() {
+                    if !backup && workers_info.running_count() + 1 < workers_info.active_count() {
                         let mut countdown = self.backup_countdown.load(Ordering::Relaxed);
                         while let Err(actual) = self.backup_countdown.compare_exchange_weak(
                             countdown,
@@ -195,6 +197,11 @@ impl<T> QueueCore<T> {
                         ) {
                             countdown = actual;
                         }
+                        eprintln!(
+                            "{:?} sleep, backup: {}",
+                            std::time::SystemTime::now(),
+                            backup
+                        );
                     }
                     return true;
                 }
