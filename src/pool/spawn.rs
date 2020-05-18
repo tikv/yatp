@@ -65,7 +65,7 @@ impl WorkersInfo for u64 {
 pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     workers_info: AtomicU64,
-    active_countdown: AtomicU8,
+    active_countdown: AtomicU64,
     backup_countdown: AtomicU8,
     wake_up_backup: AtomicU64,
     wake_up_active: AtomicU64,
@@ -79,7 +79,7 @@ impl<T> QueueCore<T> {
         QueueCore {
             global_queue,
             workers_info: AtomicU64::new(((thread_count << 17) | (thread_count << 1)) as u64),
-            active_countdown: AtomicU8::new(0),
+            active_countdown: AtomicU64::new(0),
             backup_countdown: AtomicU8::new(0),
             wake_up_backup: AtomicU64::new(0),
             wake_up_active: AtomicU64::new(0),
@@ -107,10 +107,10 @@ impl<T> QueueCore<T> {
         } else if source != 0 {
             let idling = self.idling.load(Ordering::SeqCst);
             let set_bit =
-                (workers_info.running_count() == workers_info.active_count() && !idling) as u8;
+                (workers_info.running_count() == workers_info.active_count() && !idling) as u64;
             let mut value = self.active_countdown.load(Ordering::Relaxed);
             loop {
-                let unpark = value == 0xFF;
+                let unpark = value == u64::max_value();
                 let new_value = if unpark { 0 } else { (value << 1) | set_bit };
                 match self.active_countdown.compare_exchange_weak(
                     value,
