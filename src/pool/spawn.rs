@@ -8,7 +8,7 @@ use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// An usize is used to trace the threads that are working actively.
@@ -65,6 +65,7 @@ impl WorkersInfo for u64 {
 pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     workers_info: AtomicU64,
+    active_countdown: AtomicU8,
     backup_countdown: AtomicU8,
     idling: AtomicBool,
     config: SchedConfig,
@@ -76,7 +77,8 @@ impl<T> QueueCore<T> {
         QueueCore {
             global_queue,
             workers_info: AtomicU64::new(((thread_count << 17) | (thread_count << 1)) as u64),
-            backup_countdown: AtomicU8::new(8),
+            active_countdown: AtomicU8::new(0),
+            backup_countdown: AtomicU8::new(0),
             idling: AtomicBool::new(false),
             config,
         }
@@ -91,30 +93,56 @@ impl<T> QueueCore<T> {
         if workers_info.is_shutdown() {
             return;
         }
-        let idling = self.idling.load(Ordering::SeqCst);
-        if workers_info.running_count() == workers_info.active_count()
-            && workers_info.backup_count() > 0
-            && !idling
-        {
-            eprintln!(
-                "{:?} unpark backup, running: {}, active: {}, backup: {}",
-                std::time::SystemTime::now(),
-                workers_info.running_count(),
-                workers_info.active_count(),
-                workers_info.backup_count()
-            );
-            // println!("unpark backup");
+        if self.idling.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut value = self.active_countdown.load(Ordering::Relaxed);
+        if workers_info.active_count() < self.config.min_thread_count {
             self.unpark_one(true, source);
-        } else if !idling {
-            eprintln!(
-                "{:?} unpark active, running: {}, active: {}, backup: {}",
-                std::time::SystemTime::now(),
-                workers_info.running_count(),
-                workers_info.active_count(),
-                workers_info.backup_count()
-            );
+        } else if source != 0 && workers_info.running_count() == workers_info.active_count() {
+            loop {
+                let unpark = value == 0xFF;
+                let new_value = if unpark { 0 } else { (value << 1) | 1 };
+                match self.active_countdown.compare_exchange_weak(
+                    value,
+                    new_value,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => {
+                        if unpark {
+                            self.unpark_one(true, source);
+                        }
+                        break;
+                    }
+                    Err(actual) => {
+                        value = actual;
+                    }
+                }
+            }
+        } else {
             self.unpark_one(false, source);
         }
+        // if workers_info.running_count() == workers_info.active_count()
+        //     && workers_info.backup_count() > 0
+        // {
+        //     // eprintln!(
+        //     //     "unpark backup, running: {}, active: {}, backup: {}",
+        //     //     workers_info.running_count(),
+        //     //     workers_info.active_count(),
+        //     //     workers_info.backup_count()
+        //     // );
+        //     // println!("unpark backup");
+        //     self.unpark_one(true, source);
+        // } else {
+        //     // eprintln!(
+        //     //     "unpark active, running: {}, active: {}, backup: {}",
+        //     //     workers_info.running_count(),
+        //     //     workers_info.active_count(),
+        //     //     workers_info.backup_count()
+        //     // );
+        //     self.unpark_one(false, source);
+        // }
     }
 
     fn unpark_one(&self, backup: bool, source: usize) {
@@ -125,8 +153,8 @@ impl<T> QueueCore<T> {
 
     pub fn park_to_backup(&self) -> bool {
         self.backup_countdown
-            .compare_and_swap(0, 8, Ordering::SeqCst)
-            == 0
+            .compare_and_swap(255, 0, Ordering::SeqCst)
+            == 255
     }
 
     pub fn park_address(&self, backup: bool) -> usize {
@@ -187,21 +215,23 @@ impl<T> QueueCore<T> {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => {
-                    if !backup && workers_info.running_count() + 1 < workers_info.active_count() {
-                        let mut countdown = self.backup_countdown.load(Ordering::Relaxed);
-                        while let Err(actual) = self.backup_countdown.compare_exchange_weak(
-                            countdown,
-                            countdown.saturating_sub(1),
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        ) {
-                            countdown = actual;
-                        }
-                        eprintln!(
-                            "{:?} sleep, backup: {}",
-                            std::time::SystemTime::now(),
-                            backup
-                        );
+                    let down =
+                        (workers_info.running_count() + 1 < workers_info.active_count()) as u8;
+                    // println!(
+                    //     "running: {}, active: {}, backup: {}, down: {}",
+                    //     workers_info.running_count(),
+                    //     workers_info.active_count(),
+                    //     workers_info.backup_count(),
+                    //     down
+                    // );
+                    let mut countdown = self.backup_countdown.load(Ordering::Relaxed);
+                    while let Err(actual) = self.backup_countdown.compare_exchange_weak(
+                        countdown,
+                        (countdown << 1) | down,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        countdown = actual;
                     }
                     return true;
                 }
@@ -231,7 +261,16 @@ impl<T> QueueCore<T> {
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             ) {
-                Ok(_) => return,
+                Ok(_) => {
+                    // println!(
+                    //     "wake! running: {}, active: {}, backup: {}, backup: {}",
+                    //     workers_info.running_count(),
+                    //     workers_info.active_count(),
+                    //     workers_info.backup_count(),
+                    //     backup
+                    // );
+                    return;
+                }
                 Err(actual) => workers_info = actual,
             }
         }
@@ -298,7 +337,7 @@ impl<T: Send> AssertSend for Remote<T> {}
 /// instead of global queue, so new tasks can take advantage of cache
 /// coherence.
 pub struct Local<T> {
-    id: usize,
+    pub(crate) id: usize,
     local_queue: LocalQueue<T>,
     core: Arc<QueueCore<T>>,
 }

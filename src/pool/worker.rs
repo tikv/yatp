@@ -24,6 +24,7 @@ where
 {
     #[inline]
     fn pop(&mut self) -> Option<Pop<T>> {
+        self.local.core().ensure_workers(self.local.id);
         let idling = self.local.core().mark_idling();
         let mut counter = 0;
         while idling {
