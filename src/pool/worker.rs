@@ -24,22 +24,19 @@ where
 {
     #[inline]
     fn pop(&mut self) -> Option<Pop<T>> {
-        let idling = self.local.core().mark_idling();
-        let mut counter = 0;
-        while idling {
+        // let idling = self.local.core().mark_idling();
+        for counter in 0..10 {
             if let Some(t) = self.local.pop() {
-                self.local.core().unmark_idling();
+                // self.local.core().unmark_idling();
                 self.local.core().ensure_workers(self.local.id);
                 return Some(t);
             }
-            counter += 1;
             if counter < 3 {
-                thread::yield_now();
-            } else if counter < 10 {
-                thread::sleep(Duration::from_micros(10));
+                for _ in 0..(1 << counter) {
+                    std::sync::atomic::spin_loop_hint();
+                }
             } else {
-                self.local.core().unmark_idling();
-                break;
+                thread::yield_now();
             }
         }
         self.runner.pause(&mut self.local);

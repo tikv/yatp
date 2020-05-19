@@ -37,7 +37,7 @@ trait WorkersInfo {
     fn is_shutdown(self) -> bool;
     fn running_count(self) -> usize;
     fn active_count(self) -> usize;
-    fn backup_count(self) -> usize;
+    fn park_backup_counter(self) -> usize;
 }
 
 impl WorkersInfo for u64 {
@@ -53,7 +53,7 @@ impl WorkersInfo for u64 {
         ((self >> 17) & (u16::max_value() as u64)) as usize
     }
 
-    fn backup_count(self) -> usize {
+    fn park_backup_counter(self) -> usize {
         ((self >> 33) & (u16::max_value() as u64)) as usize
     }
 }
@@ -65,11 +65,8 @@ impl WorkersInfo for u64 {
 pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     workers_info: AtomicU64,
-    active_countdown: AtomicU64,
-    backup_countdown: AtomicU8,
-    wake_up_backup: AtomicU64,
-    wake_up_active: AtomicU64,
-    idling: AtomicBool,
+    unpark_backup_counter: AtomicU64,
+    park_backup_counter: AtomicU64,
     config: SchedConfig,
 }
 
@@ -79,11 +76,8 @@ impl<T> QueueCore<T> {
         QueueCore {
             global_queue,
             workers_info: AtomicU64::new(((thread_count << 17) | (thread_count << 1)) as u64),
-            active_countdown: AtomicU64::new(0),
-            backup_countdown: AtomicU8::new(0),
-            wake_up_backup: AtomicU64::new(0),
-            wake_up_active: AtomicU64::new(0),
-            idling: AtomicBool::new(false),
+            unpark_backup_counter: AtomicU64::new(0),
+            park_backup_counter: AtomicU64::new(0),
             config,
         }
     }
@@ -98,61 +92,34 @@ impl<T> QueueCore<T> {
             return;
         }
         // if source == 0 {
-        //     println!("backup: {}", workers_info.backup_count());
+        //     println!("backup: {}", workers_info.park_backup_counter());
         // }
         if workers_info.active_count() < self.config.min_thread_count {
             self.unpark_one(true, source);
         } else if workers_info.running_count() < self.config.min_thread_count {
             self.unpark_one(false, source);
         } else if source != 0 {
-            let idling = self.idling.load(Ordering::SeqCst);
-            let set_bit =
-                (workers_info.running_count() == workers_info.active_count() && !idling) as u64;
-            let mut value = self.active_countdown.load(Ordering::Relaxed);
-            loop {
-                let unpark = value == u64::max_value();
-                let new_value = if unpark { 0 } else { (value << 1) | set_bit };
-                match self.active_countdown.compare_exchange_weak(
-                    value,
-                    new_value,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
-                    Ok(_) => {
-                        if unpark {
-                            self.unpark_one(true, source);
-                        }
+            if workers_info.running_count() < workers_info.active_count() {
+                self.unpark_backup_counter.store(0, Ordering::SeqCst);
+                self.unpark_one(false, source);
+            } else {
+                let mut v = self.unpark_backup_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                loop {
+                    if v < 64 {
                         break;
                     }
-                    Err(actual) => {
-                        value = actual;
+                    match self.unpark_backup_counter.compare_exchange_weak(
+                        v,
+                        0,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => self.unpark_one(true, source),
+                        Err(actual) => v = actual,
                     }
                 }
             }
-            if workers_info.running_count() < workers_info.active_count() && !idling {
-                self.unpark_one(false, source);
-            }
         }
-        // if workers_info.running_count() == workers_info.active_count()
-        //     && workers_info.backup_count() > 0
-        // {
-        //     // eprintln!(
-        //     //     "unpark backup, running: {}, active: {}, backup: {}",
-        //     //     workers_info.running_count(),
-        //     //     workers_info.active_count(),
-        //     //     workers_info.backup_count()
-        //     // );
-        //     // println!("unpark backup");
-        //     self.unpark_one(true, source);
-        // } else {
-        //     // eprintln!(
-        //     //     "unpark active, running: {}, active: {}, backup: {}",
-        //     //     workers_info.running_count(),
-        //     //     workers_info.active_count(),
-        //     //     workers_info.backup_count()
-        //     // );
-        //     self.unpark_one(false, source);
-        // }
     }
 
     fn unpark_one(&self, backup: bool, source: usize) {
@@ -162,9 +129,21 @@ impl<T> QueueCore<T> {
     }
 
     pub fn park_to_backup(&self) -> bool {
-        self.backup_countdown
-            .compare_and_swap(255, 0, Ordering::SeqCst)
-            == 255
+        let mut v = self.park_backup_counter.load(Ordering::SeqCst);
+        loop {
+            if v < 64 {
+                return false;
+            }
+            match self.park_backup_counter.compare_exchange_weak(
+                v,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => v = actual,
+            }
+        }
     }
 
     pub fn park_address(&self, backup: bool) -> usize {
@@ -173,14 +152,6 @@ impl<T> QueueCore<T> {
         } else {
             self as *const QueueCore<T> as usize
         }
-    }
-
-    pub fn mark_idling(&self) -> bool {
-        !self.idling.compare_and_swap(false, true, Ordering::SeqCst)
-    }
-
-    pub fn unmark_idling(&self) {
-        self.idling.store(false, Ordering::SeqCst);
     }
 
     /// Sets the shutdown bit and notify all threads.
@@ -210,11 +181,11 @@ impl<T> QueueCore<T> {
             }
 
             let new_info = if backup {
-                ((workers_info.backup_count() as u64 + 1) << 33)
+                ((workers_info.park_backup_counter() as u64 + 1) << 33)
                     | ((workers_info.active_count() as u64 - 1) << 17)
                     | ((workers_info.running_count() as u64 - 1) << 1)
             } else {
-                ((workers_info.backup_count() as u64) << 33)
+                ((workers_info.park_backup_counter() as u64) << 33)
                     | ((workers_info.active_count() as u64) << 17)
                     | ((workers_info.running_count() as u64 - 1) << 1)
             };
@@ -225,24 +196,10 @@ impl<T> QueueCore<T> {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => {
-                    let down =
-                        (workers_info.running_count() + 1 < workers_info.active_count()) as u8;
-                    // println!("down: {}", down);
-                    // println!(
-                    //     "running: {}, active: {}, backup: {}, down: {}",
-                    //     workers_info.running_count(),
-                    //     workers_info.active_count(),
-                    //     workers_info.backup_count(),
-                    //     down
-                    // );
-                    let mut countdown = self.backup_countdown.load(Ordering::Relaxed);
-                    while let Err(actual) = self.backup_countdown.compare_exchange_weak(
-                        countdown,
-                        (countdown << 1) | down,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        countdown = actual;
+                    if workers_info.running_count() < workers_info.active_count() {
+                        self.park_backup_counter.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        self.park_backup_counter.store(0, Ordering::SeqCst);
                     }
                     return true;
                 }
@@ -253,20 +210,15 @@ impl<T> QueueCore<T> {
 
     /// Marks current thread as woken up states.
     pub fn mark_woken(&self, backup: bool) {
-        if backup {
-            self.wake_up_backup.fetch_add(1, Ordering::SeqCst);
-        } else {
-            self.wake_up_active.fetch_add(1, Ordering::SeqCst);
-        }
         let mut workers_info = self.workers_info.load(Ordering::SeqCst);
         loop {
             let new_info = if backup {
-                ((workers_info.backup_count() as u64 - 1) << 33)
+                ((workers_info.park_backup_counter() as u64 - 1) << 33)
                     | ((workers_info.active_count() as u64 + 1) << 17)
                     | ((workers_info.running_count() as u64 + 1) << 1)
                     | workers_info.is_shutdown() as u64
             } else {
-                ((workers_info.backup_count() as u64) << 33)
+                ((workers_info.park_backup_counter() as u64) << 33)
                     | ((workers_info.active_count() as u64) << 17)
                     | ((workers_info.running_count() as u64 + 1) << 1)
                     | workers_info.is_shutdown() as u64
@@ -278,13 +230,6 @@ impl<T> QueueCore<T> {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => {
-                    // println!(
-                    //     "wake! running: {}, active: {}, backup: {}, backup: {}",
-                    //     workers_info.running_count(),
-                    //     workers_info.active_count(),
-                    //     workers_info.backup_count(),
-                    //     backup
-                    // );
                     return;
                 }
                 Err(actual) => workers_info = actual,
@@ -304,16 +249,6 @@ impl<T: TaskCell + Send> QueueCore<T> {
 
     fn default_extras(&self) -> Extras {
         self.global_queue.default_extras()
-    }
-}
-
-impl<T> Drop for QueueCore<T> {
-    fn drop(&mut self) {
-        println!(
-            "wake active: {}, wake backup: {}",
-            self.wake_up_active.load(Ordering::SeqCst),
-            self.wake_up_backup.load(Ordering::SeqCst)
-        );
     }
 }
 
