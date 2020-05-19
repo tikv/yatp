@@ -28,8 +28,6 @@ trait WorkersInfo {
 
     fn backup_count(self) -> usize;
 
-    fn set_shutdown(self) -> Self;
-
     // Change an active worker from not running to running.
     fn active_to_running(self) -> Self;
 
@@ -72,17 +70,13 @@ impl WorkersInfo for u64 {
         ((self >> BACKUP_COUNT_SHIFT) & COUNT_MASK) as usize
     }
 
-    fn set_shutdown(self) -> Self {
-        self | SHUTDOWN_BIT
-    }
-
     fn active_to_running(self) -> Self {
-        debug_assert!(self.running_count() < self.active_count());
+        debug_assert!(self.is_shutdown() || self.running_count() < self.active_count());
         self + (1 << RUNNING_COUNT_SHIFT)
     }
 
     fn running_to_active(self) -> Self {
-        debug_assert!(self.running_count() > 0);
+        debug_assert!(self.is_shutdown() || self.running_count() > 0);
         self - (1 << RUNNING_COUNT_SHIFT)
     }
 

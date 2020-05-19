@@ -124,7 +124,9 @@ mod tests {
         };
         let metrics = r.metrics.clone();
         let mut expected_metrics = Metrics::default();
-        let (injector, mut locals) = build_spawn(QueueType::SingleLevel, Default::default());
+        let mut config = crate::pool::SchedConfig::default();
+        config.max_thread_count = 1;
+        let (injector, mut locals) = build_spawn(QueueType::SingleLevel, config);
         let th = WorkerThread::new(locals.remove(0), r);
         let handle = std::thread::spawn(move || {
             th.run();
