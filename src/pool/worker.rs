@@ -2,9 +2,7 @@
 
 use crate::pool::{Local, Runner};
 use crate::queue::{Pop, TaskCell};
-use parking_lot_core::SpinWait;
 use std::thread;
-use std::time::Duration;
 
 pub(crate) struct WorkerThread<T, R> {
     local: Local<T>,
@@ -24,10 +22,8 @@ where
 {
     #[inline]
     fn pop(&mut self) -> Option<Pop<T>> {
-        // let idling = self.local.core().mark_idling();
         for counter in 0..10 {
             if let Some(t) = self.local.pop() {
-                // self.local.core().unmark_idling();
                 self.local.core().ensure_workers(self.local.id);
                 return Some(t);
             }

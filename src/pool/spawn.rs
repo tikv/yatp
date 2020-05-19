@@ -8,55 +8,94 @@ use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// An usize is used to trace the threads that are working actively.
-/// To save additional memory and atomic operation, the number and
-/// shutdown hint are merged into one number in the following format
-/// ```text
-/// 0...00
-/// ^    ^
-/// |    The least significant bit indicates whether the queue is shutting down.
-/// Bits represent the thread count
-/// ```
-const SHUTDOWN_BIT: usize = 1;
-const WORKER_COUNT_SHIFT: usize = 1;
-const WORKER_COUNT_BASE: usize = 2;
-
-/// Checks if shutdown bit is set.
-pub fn is_shutdown(cnt: usize) -> bool {
-    cnt & SHUTDOWN_BIT == SHUTDOWN_BIT
-}
-
-// 1 bit: shutdown
-// 16 bits: running
-// 16 bits: active
-// 16 bits: backup
+/// A u64 is used to trace the states of the workers.
+/// The highest 16 bits represent the running workers count.
+/// The 17-32 bits represent the active workers count.
+/// The 33-48 bits represent the backup workers count.
+/// The lowest 16 bits are used to save other flags, currently only the lowest
+/// bit is used to represent whether the pool has been shut down.
 trait WorkersInfo {
+    fn new(workers_count: usize) -> Self;
+
     fn is_shutdown(self) -> bool;
+
     fn running_count(self) -> usize;
+
     fn active_count(self) -> usize;
-    fn park_backup_counter(self) -> usize;
+
+    fn backup_count(self) -> usize;
+
+    fn set_shutdown(self) -> Self;
+
+    // Change an active worker from not running to running.
+    fn active_to_running(self) -> Self;
+
+    // Change an running worker to a not running but active worker.
+    fn running_to_active(self) -> Self;
+
+    // Change an running worker to a backup worker.
+    fn running_to_backup(self) -> Self;
+
+    // Change a backup worker to a running worker.
+    fn backup_to_running(self) -> Self;
 }
+
+const SHUTDOWN_BIT: u64 = 1;
+const RUNNING_COUNT_SHIFT: u32 = 48;
+const ACTIVE_COUNT_SHIFT: u32 = 32;
+const BACKUP_COUNT_SHIFT: u32 = 16;
+const COUNT_MASK: u64 = 0xFFFF;
 
 impl WorkersInfo for u64 {
+    fn new(workers_count: usize) -> u64 {
+        let workers_count = workers_count as u64;
+        assert!(workers_count <= COUNT_MASK, "too many workers");
+        (workers_count << ACTIVE_COUNT_SHIFT) | (workers_count << RUNNING_COUNT_SHIFT)
+    }
+
     fn is_shutdown(self) -> bool {
-        self & 1 == 1
+        self & SHUTDOWN_BIT == SHUTDOWN_BIT
     }
 
     fn running_count(self) -> usize {
-        ((self >> 1) & (u16::max_value() as u64)) as usize
+        ((self >> RUNNING_COUNT_SHIFT) & COUNT_MASK) as usize
     }
 
     fn active_count(self) -> usize {
-        ((self >> 17) & (u16::max_value() as u64)) as usize
+        ((self >> ACTIVE_COUNT_SHIFT) & COUNT_MASK) as usize
     }
 
-    fn park_backup_counter(self) -> usize {
-        ((self >> 33) & (u16::max_value() as u64)) as usize
+    fn backup_count(self) -> usize {
+        ((self >> BACKUP_COUNT_SHIFT) & COUNT_MASK) as usize
+    }
+
+    fn set_shutdown(self) -> Self {
+        self | SHUTDOWN_BIT
+    }
+
+    fn active_to_running(self) -> Self {
+        debug_assert!(self.running_count() < self.active_count());
+        self + (1 << RUNNING_COUNT_SHIFT)
+    }
+
+    fn running_to_active(self) -> Self {
+        debug_assert!(self.running_count() > 0);
+        self - (1 << RUNNING_COUNT_SHIFT)
+    }
+
+    fn running_to_backup(self) -> Self {
+        self - (1 << RUNNING_COUNT_SHIFT) - (1 << ACTIVE_COUNT_SHIFT) + (1 << BACKUP_COUNT_SHIFT)
+    }
+
+    fn backup_to_running(self) -> Self {
+        self + (1 << RUNNING_COUNT_SHIFT) + (1 << ACTIVE_COUNT_SHIFT) - (1 << BACKUP_COUNT_SHIFT)
     }
 }
+
+const BACKUP_THRESHOLD: i64 = 64;
 
 /// The core of queues.
 ///
@@ -65,19 +104,16 @@ impl WorkersInfo for u64 {
 pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     workers_info: AtomicU64,
-    unpark_backup_counter: AtomicU64,
-    park_backup_counter: AtomicU64,
+    backup_count: AtomicI64,
     config: SchedConfig,
 }
 
 impl<T> QueueCore<T> {
     pub fn new(global_queue: TaskInjector<T>, config: SchedConfig) -> QueueCore<T> {
-        let thread_count = config.max_thread_count as u64;
         QueueCore {
             global_queue,
-            workers_info: AtomicU64::new(((thread_count << 17) | (thread_count << 1)) as u64),
-            unpark_backup_counter: AtomicU64::new(0),
-            park_backup_counter: AtomicU64::new(0),
+            workers_info: AtomicU64::new(WorkersInfo::new(config.max_thread_count)),
+            backup_count: AtomicI64::new(0),
             config,
         }
     }
@@ -91,33 +127,43 @@ impl<T> QueueCore<T> {
         if workers_info.is_shutdown() {
             return;
         }
-        // if source == 0 {
-        //     println!("backup: {}", workers_info.park_backup_counter());
-        // }
+
         if workers_info.active_count() < self.config.min_thread_count {
             self.unpark_one(true, source);
         } else if workers_info.running_count() < self.config.min_thread_count {
             self.unpark_one(false, source);
         } else if source != 0 {
-            if workers_info.running_count() < workers_info.active_count() {
-                self.unpark_backup_counter.store(0, Ordering::SeqCst);
-                self.unpark_one(false, source);
-            } else {
-                let mut v = self.unpark_backup_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                loop {
-                    if v < 64 {
-                        break;
-                    }
-                    match self.unpark_backup_counter.compare_exchange_weak(
-                        v,
-                        0,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(_) => self.unpark_one(true, source),
-                        Err(actual) => v = actual,
+            if workers_info.running_count() == workers_info.active_count() {
+                let mut backup_count = self.backup_count.load(Ordering::SeqCst);
+                if backup_count > 0 {
+                    self.backup_count.store(0, Ordering::SeqCst);
+                } else {
+                    backup_count = self.backup_count.fetch_sub(1, Ordering::SeqCst) - 1;
+                    while backup_count < -BACKUP_THRESHOLD {
+                        match self.backup_count.compare_exchange_weak(
+                            backup_count,
+                            0,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(_) => {
+                                self.unpark_one(true, source);
+                                break;
+                            }
+                            Err(actual) => backup_count = actual,
+                        }
                     }
                 }
+            } else if workers_info.running_count() + 1 < workers_info.active_count() {
+                let backup_count = self.backup_count.load(Ordering::SeqCst);
+                if backup_count < 0 {
+                    self.backup_count.store(0, Ordering::SeqCst)
+                } else {
+                    self.backup_count.fetch_add(1, Ordering::SeqCst);
+                }
+                self.unpark_one(false, source);
+            } else if workers_info.running_count() < workers_info.active_count() {
+                self.unpark_one(false, source);
             }
         }
     }
@@ -129,17 +175,15 @@ impl<T> QueueCore<T> {
     }
 
     pub fn park_to_backup(&self) -> bool {
-        let mut v = self.park_backup_counter.load(Ordering::SeqCst);
+        let mut v = self.backup_count.load(Ordering::SeqCst);
         loop {
-            if v < 64 {
+            if v < BACKUP_THRESHOLD {
                 return false;
             }
-            match self.park_backup_counter.compare_exchange_weak(
-                v,
-                0,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
+            match self
+                .backup_count
+                .compare_exchange_weak(v, 0, Ordering::SeqCst, Ordering::SeqCst)
+            {
                 Ok(_) => return true,
                 Err(actual) => v = actual,
             }
@@ -181,13 +225,9 @@ impl<T> QueueCore<T> {
             }
 
             let new_info = if backup {
-                ((workers_info.park_backup_counter() as u64 + 1) << 33)
-                    | ((workers_info.active_count() as u64 - 1) << 17)
-                    | ((workers_info.running_count() as u64 - 1) << 1)
+                workers_info.running_to_backup()
             } else {
-                ((workers_info.park_backup_counter() as u64) << 33)
-                    | ((workers_info.active_count() as u64) << 17)
-                    | ((workers_info.running_count() as u64 - 1) << 1)
+                workers_info.running_to_active()
             };
             match self.workers_info.compare_exchange_weak(
                 workers_info,
@@ -197,9 +237,12 @@ impl<T> QueueCore<T> {
             ) {
                 Ok(_) => {
                     if workers_info.running_count() < workers_info.active_count() {
-                        self.park_backup_counter.fetch_add(1, Ordering::SeqCst);
-                    } else {
-                        self.park_backup_counter.store(0, Ordering::SeqCst);
+                        let backup_count = self.backup_count.load(Ordering::SeqCst);
+                        if backup_count < 0 {
+                            self.backup_count.store(0, Ordering::SeqCst)
+                        } else {
+                            self.backup_count.fetch_add(1, Ordering::SeqCst);
+                        }
                     }
                     return true;
                 }
@@ -210,18 +253,13 @@ impl<T> QueueCore<T> {
 
     /// Marks current thread as woken up states.
     pub fn mark_woken(&self, backup: bool) {
+        // println!("wake up, backup: {}", backup);
         let mut workers_info = self.workers_info.load(Ordering::SeqCst);
         loop {
             let new_info = if backup {
-                ((workers_info.park_backup_counter() as u64 - 1) << 33)
-                    | ((workers_info.active_count() as u64 + 1) << 17)
-                    | ((workers_info.running_count() as u64 + 1) << 1)
-                    | workers_info.is_shutdown() as u64
+                workers_info.backup_to_running()
             } else {
-                ((workers_info.park_backup_counter() as u64) << 33)
-                    | ((workers_info.active_count() as u64) << 17)
-                    | ((workers_info.running_count() as u64 + 1) << 1)
-                    | workers_info.is_shutdown() as u64
+                workers_info.active_to_running()
             };
             match self.workers_info.compare_exchange_weak(
                 workers_info,
