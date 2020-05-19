@@ -8,7 +8,7 @@ use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// A u64 is used to trace the states of the workers.
@@ -99,6 +99,7 @@ pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     workers_info: AtomicU64,
     backup_count: AtomicI64,
+    notified: AtomicBool,
     config: SchedConfig,
 }
 
@@ -108,6 +109,7 @@ impl<T> QueueCore<T> {
             global_queue,
             workers_info: AtomicU64::new(WorkersInfo::new(config.max_thread_count)),
             backup_count: AtomicI64::new(0),
+            notified: AtomicBool::new(false),
             config,
         }
     }
@@ -157,6 +159,13 @@ impl<T> QueueCore<T> {
                 }
                 self.unpark_one(false, source);
             } else if workers_info.running_count() < workers_info.active_count() {
+                self.unpark_one(false, source);
+            }
+        } else if workers_info.running_count() < workers_info.active_count() {
+            if !self
+                .notified
+                .compare_and_swap(false, true, Ordering::SeqCst)
+            {
                 self.unpark_one(false, source);
             }
         }
@@ -247,7 +256,9 @@ impl<T> QueueCore<T> {
 
     /// Marks current thread as woken up states.
     pub fn mark_woken(&self, backup: bool) {
-        // println!("wake up, backup: {}", backup);
+        if !backup {
+            self.notified.store(false, Ordering::SeqCst);
+        }
         let mut workers_info = self.workers_info.load(Ordering::SeqCst);
         loop {
             let new_info = if backup {
