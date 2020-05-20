@@ -24,6 +24,9 @@ where
     fn pop(&mut self) -> Option<Pop<T>> {
         for counter in 0..10 {
             if let Some(t) = self.local.pop() {
+                // if t.schedule_time.elapsed() > Duration::from_millis(1) {
+                //     self.local.core().unpark_one(true, self.local.id);
+                // }
                 self.local.core().ensure_workers(self.local.id);
                 return Some(t);
             }
@@ -61,7 +64,7 @@ mod tests {
     use crate::queue::QueueType;
     use crate::task::callback;
     use std::sync::*;
-    use std::time::*;
+    use std::time::Duration;
 
     #[derive(Default, PartialEq, Debug)]
     struct Metrics {

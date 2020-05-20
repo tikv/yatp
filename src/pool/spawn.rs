@@ -8,6 +8,7 @@ use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
+use prometheus::{Histogram, HistogramOpts};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -220,7 +221,14 @@ impl<T> QueueCore<T> {
     /// Marks the current thread in sleep state.
     ///
     /// It can be marked as sleep only when the pool is not shutting down.
-    pub fn mark_sleep(&self, backup: bool) -> bool {
+    pub fn mark_sleep(&self, backup: bool, active_count_histogram: &Histogram) -> bool {
+        if !backup
+            && self
+                .notified
+                .compare_and_swap(true, false, Ordering::SeqCst)
+        {
+            return false;
+        }
         let mut workers_info = self.workers_info.load(Ordering::SeqCst);
         loop {
             if workers_info.is_shutdown() {
@@ -246,6 +254,9 @@ impl<T> QueueCore<T> {
                         } else {
                             self.backup_count.fetch_add(1, Ordering::SeqCst);
                         }
+                    }
+                    if backup {
+                        active_count_histogram.observe((workers_info.active_count() - 1) as f64);
                     }
                     return true;
                 }
@@ -344,14 +355,21 @@ pub struct Local<T> {
     pub(crate) id: usize,
     local_queue: LocalQueue<T>,
     core: Arc<QueueCore<T>>,
+    active_count_histogram: Histogram,
 }
 
 impl<T: TaskCell + Send> Local<T> {
-    pub(crate) fn new(id: usize, local_queue: LocalQueue<T>, core: Arc<QueueCore<T>>) -> Local<T> {
+    pub(crate) fn new(
+        id: usize,
+        local_queue: LocalQueue<T>,
+        core: Arc<QueueCore<T>>,
+        active_count_histogram: Histogram,
+    ) -> Local<T> {
         Local {
             id,
             local_queue,
             core,
+            active_count_histogram,
         }
     }
 
@@ -390,14 +408,16 @@ impl<T: TaskCell + Send> Local<T> {
         let backup = self.core.park_to_backup();
         let mut task = None;
         let id = self.id;
+        let mut marked_sleep = false;
 
         let res = unsafe {
             parking_lot_core::park(
                 self.core.park_address(backup),
                 || {
-                    if !self.core.mark_sleep(backup) {
+                    if !self.core.mark_sleep(backup, &self.active_count_histogram) {
                         return false;
                     }
+                    marked_sleep = true;
                     task = self.local_queue.pop();
                     task.is_none()
                 },
@@ -409,7 +429,9 @@ impl<T: TaskCell + Send> Local<T> {
         };
         match res {
             ParkResult::Unparked(_) | ParkResult::Invalid => {
-                self.core.mark_woken(backup);
+                if marked_sleep {
+                    self.core.mark_woken(backup);
+                }
                 self.core.ensure_workers(id);
                 task
             }
@@ -440,10 +462,11 @@ where
     let queue_type = queue_type.into();
     let (global, locals) = crate::queue::build(queue_type, config.max_thread_count);
     let core = Arc::new(QueueCore::new(global, config));
+    let backup_counter = Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap();
     let l = locals
         .into_iter()
         .enumerate()
-        .map(|(i, l)| Local::new(i + 1, l, core.clone()))
+        .map(|(i, l)| Local::new(i + 1, l, core.clone(), backup_counter.clone()))
         .collect();
     let g = Remote::new(core);
     (g, l)
