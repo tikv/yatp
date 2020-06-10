@@ -39,9 +39,7 @@ mod yatp_future {
     use yatp::task::future::TaskCell;
     use yatp::Remote;
 
-    pub fn chained_spawn(b: &mut Bencher<'_>, iter_count: usize) {
-        let pool = yatp::Builder::new("chained_spawn").build_future_pool();
-
+    fn chained_spawn(b: &mut Bencher<'_>, pool: yatp::ThreadPool<TaskCell>, iter_count: usize) {
         fn iter(remote: Remote<TaskCell>, done_tx: mpsc::SyncSender<()>, n: usize) {
             if n == 0 {
                 done_tx.send(()).unwrap();
@@ -64,6 +62,16 @@ mod yatp_future {
 
             done_rx.recv().unwrap();
         });
+    }
+
+    pub fn chained_spawn_single_level(b: &mut Bencher<'_>, iter_count: usize) {
+        let pool = yatp::Builder::new("chained_spawn").build_future_pool();
+        chained_spawn(b, pool, iter_count)
+    }
+
+    pub fn chained_spawn_multilevel(b: &mut Bencher<'_>, iter_count: usize) {
+        let pool = yatp::Builder::new("chained_spawn").build_multilevel_future_pool();
+        chained_spawn(b, pool, iter_count)
     }
 }
 
@@ -134,13 +142,18 @@ mod async_std {
 
 pub fn chained_spawn(b: &mut Criterion) {
     let mut group = b.benchmark_group("chained_spawn");
-    for i in &[100, 400, 700, 1000] {
+    for i in &[256, 512, 1024] {
         group.bench_with_input(BenchmarkId::new("yatp::future", i), i, |b, i| {
-            yatp_future::chained_spawn(b, *i)
+            yatp_future::chained_spawn_single_level(b, *i)
         });
         group.bench_with_input(BenchmarkId::new("yatp::callback", i), i, |b, i| {
             yatp_callback::chained_spawn(b, *i)
         });
+        group.bench_with_input(
+            BenchmarkId::new("yatp::future::multilevel", i),
+            i,
+            |b, i| yatp_future::chained_spawn_multilevel(b, *i),
+        );
         group.bench_with_input(BenchmarkId::new("tokio", i), i, |b, i| {
             tokio::chained_spawn(b, *i)
         });

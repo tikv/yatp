@@ -96,3 +96,17 @@ fn test_remote() {
     let res = rx.recv_timeout(Duration::from_millis(500));
     assert_eq!(res, Err(mpsc::RecvTimeoutError::Timeout));
 }
+
+#[test]
+fn test_shutdown_in_pool() {
+    let pool = Builder::new("test_shutdown_in_pool")
+        .max_thread_count(4)
+        .build_callback_pool();
+    let remote = pool.remote().clone();
+    let (tx, rx) = mpsc::channel();
+    remote.spawn(move |_: &mut Handle<'_>| {
+        pool.shutdown();
+        tx.send(()).unwrap();
+    });
+    rx.recv_timeout(Duration::from_secs(1)).unwrap();
+}

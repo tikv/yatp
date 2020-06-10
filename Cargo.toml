@@ -45,3 +45,4 @@ harness = false
 
 [profile.bench]
 codegen-units = 1
+debug = true
