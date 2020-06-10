@@ -94,7 +94,7 @@ where
             );
         }
         ThreadPool {
-            remote: Remote::new(self.core.clone()),
+            remote: Remote::new(self.core),
             threads: Mutex::new(threads),
         }
     }
