@@ -508,6 +508,7 @@ impl Default for Config {
 }
 
 /// The builder of a multilevel task queue.
+#[derive(Clone)]
 pub struct Builder {
     manager: Arc<LevelManager>,
 }
