@@ -139,7 +139,7 @@ impl<T: TaskCell + Send> QueueCore<T> {
 /// Note that thread pool can be shutdown and dropped even not all remotes are
 /// dropped.
 pub struct Remote<T> {
-    core: Arc<QueueCore<T>>,
+    pub(crate) core: Arc<QueueCore<T>>,
 }
 
 impl<T: TaskCell + Send> Remote<T> {
