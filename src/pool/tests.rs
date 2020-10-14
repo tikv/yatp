@@ -61,20 +61,22 @@ fn test_basic() {
         });
     }
     pool.shutdown();
+    // After dropping this tx, all tx should be destructed.
+    drop(tx);
     for _ in 0..4 {
         if rx.try_recv().is_err() {
             break;
         }
     }
-    assert_eq!(
-        Err(mpsc::RecvTimeoutError::Timeout),
-        rx.recv_timeout(Duration::from_millis(250))
-    );
+    // After the pool is shut down, tasks in the queue should be dropped.
+    // So we should get a Disconnected error.
+    assert_eq!(Err(mpsc::TryRecvError::Disconnected), rx.try_recv());
 
     // Shutdown should stop processing tasks.
+    let (tx, rx) = mpsc::channel();
     pool.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap());
-    let res = rx.recv_timeout(Duration::from_millis(10));
-    assert_eq!(res, Err(mpsc::RecvTimeoutError::Timeout));
+    let res = rx.try_recv();
+    assert_eq!(res, Err(mpsc::TryRecvError::Disconnected));
 }
 
 #[test]
@@ -90,11 +92,28 @@ fn test_remote() {
     remote.spawn(move |_: &mut Handle<'_>| t.send(1).unwrap());
     assert_eq!(Ok(1), rx.recv_timeout(Duration::from_millis(500)));
 
+    for _ in 0..5 {
+        let t = tx.clone();
+        remote.spawn(move |_: &mut Handle<'_>| {
+            thread::sleep(Duration::from_millis(100));
+            t.send(0).unwrap();
+        });
+    }
+    drop(tx);
     // Shutdown should stop processing tasks.
     pool.shutdown();
-    remote.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap());
-    let res = rx.recv_timeout(Duration::from_millis(500));
-    assert_eq!(res, Err(mpsc::RecvTimeoutError::Timeout));
+    // Each thread should only wait for at most one tasks after shutdown.
+    for _ in 0..4 {
+        if rx.try_recv().is_err() {
+            break;
+        }
+    }
+    assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+
+    // spawn should return false after the pool is stopped
+    let (tx, rx) = mpsc::channel();
+    assert!(!remote.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap()));
+    assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
 }
 
 #[test]

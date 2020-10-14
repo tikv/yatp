@@ -5,7 +5,6 @@
 use crate::pool::{Local, Remote};
 use crate::queue::{Extras, WithExtras};
 
-use std::borrow::Cow;
 use std::cell::{Cell, UnsafeCell};
 use std::future::Future;
 use std::mem::ManuallyDrop;
@@ -13,6 +12,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
 use std::sync::Arc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::{borrow::Cow, ptr, sync::Weak};
 use std::{fmt, mem};
 
 /// The default repoll limit for a future runner. See `Runner::new` for
@@ -184,8 +184,11 @@ unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
             .remote
             .as_ref()
             .expect("remote should exist!!!");
-        let out_of_polling =
-            ptr.get().is_null() || !Arc::ptr_eq(&(*ptr.get()).core(), &task_remote.core);
+        let out_of_polling = ptr.get().is_null()
+            || !ptr::eq(
+                Arc::as_ptr(&(*ptr.get()).core()),
+                Weak::as_ptr(&task_remote.core),
+            );
         if out_of_polling {
             // It's out of polling process, has to be spawn to global queue.
             // It needs to clone to make it safe as it's unclear whether `self`

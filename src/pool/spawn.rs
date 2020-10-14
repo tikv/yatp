@@ -8,8 +8,11 @@ use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Weak,
+};
 
 /// An usize is used to trace the threads that are working actively.
 /// To save additional memory and atomic operation, the number and
@@ -139,22 +142,32 @@ impl<T: TaskCell + Send> QueueCore<T> {
 /// Note that thread pool can be shutdown and dropped even not all remotes are
 /// dropped.
 pub struct Remote<T> {
-    pub(crate) core: Arc<QueueCore<T>>,
+    pub(crate) core: Weak<QueueCore<T>>,
 }
 
 impl<T: TaskCell + Send> Remote<T> {
-    pub(crate) fn new(core: Arc<QueueCore<T>>) -> Remote<T> {
-        Remote { core }
+    pub(crate) fn new(core: &Arc<QueueCore<T>>) -> Remote<T> {
+        Remote {
+            core: Arc::downgrade(core),
+        }
     }
 
-    /// Submits a task to the thread pool.
-    pub fn spawn(&self, task: impl WithExtras<T>) {
-        let t = task.with_extras(|| self.core.default_extras());
-        self.core.push(0, t);
+    /// Submits a task to the thread pool. Returns `false` if the operation
+    /// fails because the pool has been stopped.
+    pub fn spawn(&self, task: impl WithExtras<T>) -> bool {
+        if let Some(core) = self.core.upgrade() {
+            let t = task.with_extras(|| core.default_extras());
+            core.push(0, t);
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn stop(&self) {
-        self.core.mark_shutdown(0);
+        if let Some(core) = self.core.upgrade() {
+            core.mark_shutdown(0);
+        }
     }
 }
 
@@ -208,9 +221,7 @@ impl<T: TaskCell + Send> Local<T> {
 
     /// Gets a remote so that tasks can be spawned from other threads.
     pub fn remote(&self) -> Remote<T> {
-        Remote {
-            core: self.core.clone(),
-        }
+        Remote::new(&self.core)
     }
 
     pub(crate) fn core(&self) -> &Arc<QueueCore<T>> {
@@ -283,6 +294,6 @@ where
         .enumerate()
         .map(|(i, l)| Local::new(i + 1, l, core.clone()))
         .collect();
-    let g = Remote::new(core);
+    let g = Remote::new(&core);
     (g, l)
 }
