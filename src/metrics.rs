@@ -27,6 +27,17 @@ lazy_static! {
     )
     .unwrap();
 
+    /// The count of active workers.
+    pub static ref ACTIVE_WORKERS_COUNT: HistogramVec = HistogramVec::new(
+        histogram_opts!(
+            "yatp_active_workers_count",
+            "the count of backup workers",
+            vec![1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0, 96.0, 128.0]
+        ),
+        &["name"]
+    )
+    .unwrap();
+
     static ref NAMESPACE: Mutex<Option<String>> = Mutex::new(None);
 }
 

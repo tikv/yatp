@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::metrics::*;
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
 use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
@@ -76,6 +77,9 @@ where
         F::Runner: Runner<TaskCell = T> + Send + 'static,
     {
         let mut threads = Vec::with_capacity(self.builder.sched_config.max_thread_count);
+        let active_count_histogram = ACTIVE_WORKERS_COUNT
+            .get_metric_with_label_values(&[&self.builder.name_prefix])
+            .unwrap();
         for (i, local_queue) in self.local_queues.into_iter().enumerate() {
             let runner = factory.build();
             let name = format!("{}-{}", self.builder.name_prefix, i);
@@ -83,7 +87,12 @@ where
             if let Some(size) = self.builder.stack_size {
                 builder = builder.stack_size(size)
             }
-            let local = Local::new(i + 1, local_queue, self.core.clone());
+            let local = Local::new(
+                i + 1,
+                local_queue,
+                self.core.clone(),
+                active_count_histogram.clone(),
+            );
             let thd = WorkerThread::new(local, runner);
             threads.push(
                 builder

@@ -2,7 +2,7 @@
 
 use crate::pool::{Local, Runner};
 use crate::queue::{Pop, TaskCell};
-use parking_lot_core::SpinWait;
+use std::thread;
 
 pub(crate) struct WorkerThread<T, R> {
     local: Local<T>,
@@ -22,14 +22,20 @@ where
 {
     #[inline]
     fn pop(&mut self) -> Option<Pop<T>> {
-        // Wait some time before going to sleep, which is more expensive.
-        let mut spin = SpinWait::new();
-        loop {
+        for counter in 0..10 {
             if let Some(t) = self.local.pop() {
+                // if t.schedule_time.elapsed() > Duration::from_millis(1) {
+                //     self.local.core().unpark_one(true, self.local.id);
+                // }
+                self.local.core().ensure_workers(self.local.id);
                 return Some(t);
             }
-            if !spin.spin() {
-                break;
+            if counter < 3 {
+                for _ in 0..(1 << counter) {
+                    std::sync::atomic::spin_loop_hint();
+                }
+            } else {
+                thread::yield_now();
             }
         }
         self.runner.pause(&mut self.local);
@@ -58,7 +64,7 @@ mod tests {
     use crate::queue::QueueType;
     use crate::task::callback;
     use std::sync::*;
-    use std::time::*;
+    use std::time::Duration;
 
     #[derive(Default, PartialEq, Debug)]
     struct Metrics {
@@ -121,7 +127,9 @@ mod tests {
         };
         let metrics = r.metrics.clone();
         let mut expected_metrics = Metrics::default();
-        let (injector, mut locals) = build_spawn(QueueType::SingleLevel, Default::default());
+        let mut config = crate::pool::SchedConfig::default();
+        config.max_thread_count = 1;
+        let (injector, mut locals) = build_spawn(QueueType::SingleLevel, config);
         let th = WorkerThread::new(locals.remove(0), r);
         let handle = std::thread::spawn(move || {
             th.run();
