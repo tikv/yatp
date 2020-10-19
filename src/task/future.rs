@@ -163,7 +163,7 @@ unsafe fn clone_task(task: *const Task) -> TaskCell {
     let extras = { &mut *task_cell.0.extras.get() };
     if extras.remote.is_none() {
         LOCAL.with(|l| {
-            extras.remote = Some((&*l.get()).remote().downgrade());
+            extras.remote = Some((&*l.get()).weak_remote());
         })
     }
     mem::forget(task_cell.0.clone());

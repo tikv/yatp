@@ -155,13 +155,6 @@ impl<T: TaskCell + Send> Remote<T> {
         self.core.push(0, t);
     }
 
-    /// Creates a `WeakRemote` from the `Remote`.
-    pub(crate) fn downgrade(&self) -> WeakRemote<T> {
-        WeakRemote {
-            core: Arc::downgrade(&self.core),
-        }
-    }
-
     pub(crate) fn stop(&self) {
         self.core.mark_shutdown(0);
     }
