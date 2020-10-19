@@ -128,10 +128,10 @@ fn test_shutdown_with_futures() {
     let remote = pool.remote().clone();
     let (tx, rx) = mpsc::channel::<()>();
 
-    // One future will be notified at 300ms.
+    // One future will be notified after 300ms.
     let tx2 = tx.clone();
     remote.spawn(async move {
-        Delay::new(Duration::from_millis(300));
+        Delay::new(Duration::from_millis(300)).await;
         drop(tx2);
     });
 
@@ -150,12 +150,18 @@ fn test_shutdown_with_futures() {
 
     // One future in the queue.
     thread::sleep(Duration::from_millis(50));
+    let tx = tx;
     remote.spawn(async move {
         drop(tx);
     });
 
-    pool.shutdown();
-    // All tx should be dropped. No future leaks.
+    // Before the pool is shut down, txs are not all dropped.
+    assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+
+    drop(remote);
+    drop(pool);
+
+    // All txs should be dropped. No future leaks.
     assert_eq!(
         rx.recv_timeout(Duration::from_millis(500)),
         Err(mpsc::RecvTimeoutError::Disconnected)
