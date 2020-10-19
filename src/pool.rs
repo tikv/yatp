@@ -12,6 +12,7 @@ mod worker;
 
 pub use self::builder::{Builder, SchedConfig};
 pub use self::runner::{CloneRunnerBuilder, Runner, RunnerBuilder};
+pub(crate) use self::spawn::WeakRemote;
 pub use self::spawn::{build_spawn, Local, Remote};
 
 use crate::queue::{TaskCell, WithExtras};

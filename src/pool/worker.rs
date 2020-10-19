@@ -48,6 +48,9 @@ where
             self.runner.handle(&mut self.local, task.task_cell);
         }
         self.runner.end(&mut self.local);
+
+        // Drain all futures in the queue
+        while self.local.pop().is_some() {}
     }
 }
 

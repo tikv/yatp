@@ -26,6 +26,7 @@ criterion = "0.3"
 tokio = { version = "0.2.0", features = ["sync", "rt-threaded"] }
 async-std = "1.0"
 threadpool = "1.0"
+futures-timer = "3"
 
 [[bench]]
 name = "spawn_many"
