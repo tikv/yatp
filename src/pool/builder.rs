@@ -94,7 +94,7 @@ where
             );
         }
         ThreadPool {
-            remote: Remote::new(&self.core),
+            remote: Remote::new(self.core),
             threads: Mutex::new(threads),
         }
     }
@@ -208,7 +208,7 @@ impl Builder {
         let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));
 
         (
-            Remote::new(&core),
+            Remote::new(core.clone()),
             LazyBuilder {
                 builder: self.clone(),
                 core,

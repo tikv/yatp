@@ -2,7 +2,7 @@
 
 //! A [`Future`].
 
-use crate::pool::{Local, Remote};
+use crate::pool::{Local, WeakRemote};
 use crate::queue::{Extras, WithExtras};
 
 use std::cell::{Cell, UnsafeCell};
@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
 use std::sync::Arc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::{borrow::Cow, ptr, sync::Weak};
+use std::{borrow::Cow, ptr};
 use std::{fmt, mem};
 
 /// The default repoll limit for a future runner. See `Runner::new` for
@@ -21,7 +21,7 @@ const DEFAULT_REPOLL_LIMIT: usize = 5;
 
 struct TaskExtras {
     extras: Extras,
-    remote: Option<Remote<TaskCell>>,
+    remote: Option<WeakRemote<TaskCell>>,
 }
 
 /// A [`Future`] task.
@@ -163,7 +163,7 @@ unsafe fn clone_task(task: *const Task) -> TaskCell {
     let extras = { &mut *task_cell.0.extras.get() };
     if extras.remote.is_none() {
         LOCAL.with(|l| {
-            extras.remote = Some((&*l.get()).remote());
+            extras.remote = Some((&*l.get()).remote().downgrade());
         })
     }
     mem::forget(task_cell.0.clone());
@@ -183,17 +183,16 @@ unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
         let task_remote = (*task.as_ref().extras.get())
             .remote
             .as_ref()
-            .expect("remote should exist!!!");
+            .expect("core should exist!!!");
         let out_of_polling = ptr.get().is_null()
-            || !ptr::eq(
-                Arc::as_ptr(&(*ptr.get()).core()),
-                Weak::as_ptr(&task_remote.core),
-            );
+            || !ptr::eq(Arc::as_ptr(&(*ptr.get()).core()), task_remote.as_core_ptr());
         if out_of_polling {
             // It's out of polling process, has to be spawn to global queue.
             // It needs to clone to make it safe as it's unclear whether `self`
             // is still used inside method `spawn` after `TaskCell` is dropped.
-            task_remote.spawn(TaskCell(task.clone().into_owned()));
+            if let Some(remote) = task_remote.upgrade() {
+                remote.spawn(TaskCell(task.clone().into_owned()));
+            }
         } else if reschedule {
             // It's requested explicitly to schedule to global queue.
             (*ptr.get()).spawn_remote(TaskCell(task.into_owned()));
@@ -269,7 +268,7 @@ impl crate::pool::Runner for Runner {
                     // at least one atomic load to detect such situation. So here just assign
                     // it to make things simple.
                     LOCAL.with(|l| {
-                        extras.remote = Some((&*l.get()).remote());
+                        extras.remote = Some((&*l.get()).weak_remote());
                     })
                 }
                 match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
@@ -323,7 +322,7 @@ impl Future for Reschedule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pool::{build_spawn, Builder, Runner as _};
+    use crate::pool::{build_spawn, Builder, Remote, Runner as _};
     use crate::queue::QueueType;
 
     use std::sync::mpsc;

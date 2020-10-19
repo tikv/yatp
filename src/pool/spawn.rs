@@ -8,10 +8,9 @@ use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
-use std::sync::Arc;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Weak,
+    Arc, Weak,
 };
 
 /// An usize is used to trace the threads that are working actively.
@@ -142,32 +141,29 @@ impl<T: TaskCell + Send> QueueCore<T> {
 /// Note that thread pool can be shutdown and dropped even not all remotes are
 /// dropped.
 pub struct Remote<T> {
-    pub(crate) core: Weak<QueueCore<T>>,
+    pub(crate) core: Arc<QueueCore<T>>,
 }
 
 impl<T: TaskCell + Send> Remote<T> {
-    pub(crate) fn new(core: &Arc<QueueCore<T>>) -> Remote<T> {
-        Remote {
-            core: Arc::downgrade(core),
-        }
+    pub(crate) fn new(core: Arc<QueueCore<T>>) -> Remote<T> {
+        Remote { core }
     }
 
-    /// Submits a task to the thread pool. Returns `false` if the operation
-    /// fails because the pool has been stopped.
-    pub fn spawn(&self, task: impl WithExtras<T>) -> bool {
-        if let Some(core) = self.core.upgrade() {
-            let t = task.with_extras(|| core.default_extras());
-            core.push(0, t);
-            true
-        } else {
-            false
+    /// Submits a task to the thread pool.
+    pub fn spawn(&self, task: impl WithExtras<T>) {
+        let t = task.with_extras(|| self.core.default_extras());
+        self.core.push(0, t);
+    }
+
+    /// Creates a `WeakRemote` from the `Remote`.
+    pub(crate) fn downgrade(&self) -> WeakRemote<T> {
+        WeakRemote {
+            core: Arc::downgrade(&self.core),
         }
     }
 
     pub(crate) fn stop(&self) {
-        if let Some(core) = self.core.upgrade() {
-            core.mark_shutdown(0);
-        }
+        self.core.mark_shutdown(0);
     }
 }
 
@@ -186,6 +182,34 @@ trait AssertSync: Sync {}
 impl<T: Send> AssertSync for Remote<T> {}
 trait AssertSend: Send {}
 impl<T: Send> AssertSend for Remote<T> {}
+
+/// `WeakRemote` is a weak reference to the inner queue.
+pub(crate) struct WeakRemote<T> {
+    core: Weak<QueueCore<T>>,
+}
+
+impl<T: TaskCell + Send> WeakRemote<T> {
+    /// Upgrade a `WeakRemote` to `Remote`.
+    pub fn upgrade(&self) -> Option<Remote<T>> {
+        self.core.upgrade().map(|core| Remote { core })
+    }
+
+    /// Returns the ptr of the inner queue core.
+    pub fn as_core_ptr(&self) -> *const QueueCore<T> {
+        self.core.as_ptr()
+    }
+}
+
+impl<T> Clone for WeakRemote<T> {
+    fn clone(&self) -> WeakRemote<T> {
+        WeakRemote {
+            core: self.core.clone(),
+        }
+    }
+}
+
+impl<T: Send> AssertSync for WeakRemote<T> {}
+impl<T: Send> AssertSend for WeakRemote<T> {}
 
 /// Spawns tasks to the associated thread pool.
 ///
@@ -221,7 +245,13 @@ impl<T: TaskCell + Send> Local<T> {
 
     /// Gets a remote so that tasks can be spawned from other threads.
     pub fn remote(&self) -> Remote<T> {
-        Remote::new(&self.core)
+        Remote::new(self.core.clone())
+    }
+
+    pub(crate) fn weak_remote(&self) -> WeakRemote<T> {
+        WeakRemote {
+            core: Arc::downgrade(&self.core),
+        }
     }
 
     pub(crate) fn core(&self) -> &Arc<QueueCore<T>> {
@@ -294,6 +324,6 @@ where
         .enumerate()
         .map(|(i, l)| Local::new(i + 1, l, core.clone()))
         .collect();
-    let g = Remote::new(&core);
+    let g = Remote::new(core);
     (g, l)
 }

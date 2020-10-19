@@ -2,6 +2,7 @@
 
 use crate::pool::*;
 use crate::task::callback::Handle;
+use futures_timer::Delay;
 use rand::seq::SliceRandom;
 use std::sync::mpsc;
 use std::thread;
@@ -71,12 +72,6 @@ fn test_basic() {
     // After the pool is shut down, tasks in the queue should be dropped.
     // So we should get a Disconnected error.
     assert_eq!(Err(mpsc::TryRecvError::Disconnected), rx.try_recv());
-
-    // Shutdown should stop processing tasks.
-    let (tx, rx) = mpsc::channel();
-    pool.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap());
-    let res = rx.try_recv();
-    assert_eq!(res, Err(mpsc::TryRecvError::Disconnected));
 }
 
 #[test]
@@ -109,11 +104,6 @@ fn test_remote() {
         }
     }
     assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
-
-    // spawn should return false after the pool is stopped
-    let (tx, rx) = mpsc::channel();
-    assert!(!remote.spawn(move |_: &mut Handle<'_>| tx.send(2).unwrap()));
-    assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
 }
 
 #[test]
@@ -128,4 +118,46 @@ fn test_shutdown_in_pool() {
         tx.send(()).unwrap();
     });
     rx.recv_timeout(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
+fn test_shutdown_with_futures() {
+    let pool = Builder::new("test_shutdown_with_futures")
+        .max_thread_count(2)
+        .build_future_pool();
+    let remote = pool.remote().clone();
+    let (tx, rx) = mpsc::channel::<()>();
+
+    // One future will be notified at 300ms.
+    let tx2 = tx.clone();
+    remote.spawn(async move {
+        Delay::new(Duration::from_millis(300));
+        drop(tx2);
+    });
+
+    // Two futures running in the pool.
+    thread::sleep(Duration::from_millis(50));
+    let tx2 = tx.clone();
+    remote.spawn(async move {
+        thread::sleep(Duration::from_millis(100));
+        drop(tx2);
+    });
+    let tx2 = tx.clone();
+    remote.spawn(async move {
+        thread::sleep(Duration::from_millis(100));
+        drop(tx2);
+    });
+
+    // One future in the queue.
+    thread::sleep(Duration::from_millis(50));
+    remote.spawn(async move {
+        drop(tx);
+    });
+
+    pool.shutdown();
+    // All tx should be dropped. No future leaks.
+    assert_eq!(
+        rx.recv_timeout(Duration::from_millis(500)),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    );
 }
