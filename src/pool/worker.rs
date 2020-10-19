@@ -50,7 +50,7 @@ where
         self.runner.end(&mut self.local);
 
         // Drain all futures in the queue
-        while let Some(_) = self.local.pop() {}
+        while self.local.pop().is_some() {}
     }
 }
 
