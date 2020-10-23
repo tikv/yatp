@@ -2,10 +2,9 @@
 
 //! A [`Future`].
 
-use crate::pool::{Local, Remote};
+use crate::pool::{Local, WeakRemote};
 use crate::queue::{Extras, WithExtras};
 
-use std::borrow::Cow;
 use std::cell::{Cell, UnsafeCell};
 use std::future::Future;
 use std::mem::ManuallyDrop;
@@ -13,6 +12,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
 use std::sync::Arc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::{borrow::Cow, ptr};
 use std::{fmt, mem};
 
 /// The default repoll limit for a future runner. See `Runner::new` for
@@ -21,7 +21,7 @@ const DEFAULT_REPOLL_LIMIT: usize = 5;
 
 struct TaskExtras {
     extras: Extras,
-    remote: Option<Remote<TaskCell>>,
+    remote: Option<WeakRemote<TaskCell>>,
 }
 
 /// A [`Future`] task.
@@ -163,7 +163,7 @@ unsafe fn clone_task(task: *const Task) -> TaskCell {
     let extras = { &mut *task_cell.0.extras.get() };
     if extras.remote.is_none() {
         LOCAL.with(|l| {
-            extras.remote = Some((&*l.get()).remote());
+            extras.remote = Some((&*l.get()).weak_remote());
         })
     }
     mem::forget(task_cell.0.clone());
@@ -177,15 +177,22 @@ thread_local! {
 
 unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
     LOCAL.with(|ptr| {
-        if ptr.get().is_null() {
+        // `wake_task` is only called when the status of the task is IDLE. Before the
+        // status is set to IDLE, the runtime will set `remote` in `TaskExtras`. So we
+        // can make sure `remote` is not None.
+        let task_remote = (*task.as_ref().extras.get())
+            .remote
+            .as_ref()
+            .expect("core should exist!!!");
+        let out_of_polling = ptr.get().is_null()
+            || !ptr::eq(Arc::as_ptr(&(*ptr.get()).core()), task_remote.as_core_ptr());
+        if out_of_polling {
             // It's out of polling process, has to be spawn to global queue.
             // It needs to clone to make it safe as it's unclear whether `self`
             // is still used inside method `spawn` after `TaskCell` is dropped.
-            (*task.as_ref().extras.get())
-                .remote
-                .as_ref()
-                .expect("remote should exist!!!")
-                .spawn(TaskCell(task.clone().into_owned()));
+            if let Some(remote) = task_remote.upgrade() {
+                remote.spawn(TaskCell(task.clone().into_owned()));
+            }
         } else if reschedule {
             // It's requested explicitly to schedule to global queue.
             (*ptr.get()).spawn_remote(TaskCell(task.into_owned()));
@@ -261,7 +268,7 @@ impl crate::pool::Runner for Runner {
                     // at least one atomic load to detect such situation. So here just assign
                     // it to make things simple.
                     LOCAL.with(|l| {
-                        extras.remote = Some((&*l.get()).remote());
+                        extras.remote = Some((&*l.get()).weak_remote());
                     })
                 }
                 match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
@@ -315,12 +322,12 @@ impl Future for Reschedule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pool::{build_spawn, Runner as _};
+    use crate::pool::{build_spawn, Builder, Remote, Runner as _};
     use crate::queue::QueueType;
 
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use std::sync::mpsc;
+    use std::{cell::RefCell, thread};
+    use std::{rc::Rc, time::Duration};
 
     struct MockLocal {
         runner: Rc<RefCell<Runner>>,
@@ -458,6 +465,30 @@ mod tests {
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 1);
         assert_eq!(res_rx.recv().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_multi_pools_wake() {
+        let pool1 = Builder::new("test_multi_pools_wake_1")
+            .max_thread_count(1)
+            .build_future_pool();
+        let pool2 = Builder::new("test_multi_pools_wake_2")
+            .max_thread_count(1)
+            .build_future_pool();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        pool1.spawn(async move {
+            let tid = thread::current().id();
+            rx.recv().await.unwrap();
+            // pool1 has only one thread, so the thread id should not change
+            assert_eq!(tid, thread::current().id());
+            tx2.send(()).unwrap();
+        });
+        thread::sleep(Duration::from_millis(500));
+        pool2.spawn(async move {
+            tx.send(()).unwrap();
+        });
+        rx2.recv().unwrap();
     }
 
     #[cfg_attr(not(feature = "failpoints"), ignore)]
