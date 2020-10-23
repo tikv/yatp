@@ -10,12 +10,12 @@ repository = "https://github.com/tikv/yatp/"
 
 [dependencies]
 crossbeam-deque = "0.7"
-dashmap = "3.5.1"
-fail = "0.3"
+dashmap = "3.11.10"
+fail = "0.4"
 lazy_static = "1"
 num_cpus = "1.0"
-parking_lot_core = "0.7"
-prometheus = "0.8"
+parking_lot_core = "0.8"
+prometheus = { version = "0.10", default-features = false }
 rand = "0.7"
 
 [features]
