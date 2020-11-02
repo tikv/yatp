@@ -15,8 +15,9 @@ fail = "0.4"
 lazy_static = "1"
 num_cpus = "1.0"
 parking_lot_core = "0.8"
-prometheus = { version = "0.10", default-features = false }
+prometheus = { version = "0.8", default-features = false }
 rand = "0.7"
+const-random-macro = "=0.1.8"
 
 [features]
 failpoints = ["fail/failpoints"]

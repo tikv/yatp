@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+#![feature(weak_into_raw)]
 #![warn(missing_docs)]
 
 //! Yatp is a thread pool that tries to be adaptive, responsive and generic.

@@ -4,13 +4,9 @@ language: rust
 matrix:
   include:
     - os: linux
-      rust: stable
-    - os: linux
-      rust: nightly
-    - os: windows
-      rust: stable
+      rust: nightly-2019-12-20
     - os: osx
-      rust: stable
+      rust: nightly-2019-12-20
 env:
   global:
     - RUST_BACKTRACE=1

@@ -5,6 +5,7 @@
 use crate::pool::{Local, WeakRemote};
 use crate::queue::{Extras, WithExtras};
 
+use std::borrow::Cow;
 use std::cell::{Cell, UnsafeCell};
 use std::future::Future;
 use std::mem::ManuallyDrop;
@@ -12,7 +13,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
 use std::sync::Arc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::{borrow::Cow, ptr};
 use std::{fmt, mem};
 
 /// The default repoll limit for a future runner. See `Runner::new` for
@@ -184,8 +184,12 @@ unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
             .remote
             .as_ref()
             .expect("core should exist!!!");
-        let out_of_polling = ptr.get().is_null()
-            || !ptr::eq(Arc::as_ptr(&(*ptr.get()).core()), task_remote.as_core_ptr());
+        // Workaround for older Rust version which does not provide Arc::as_ptr.
+        // `task_remote.as_core_ptr` does not increase the strong count, so we must forget
+        // instead of simply dropping the `Arc` generated here.
+        let weak_arc = Arc::from_raw(task_remote.as_core_ptr());
+        let out_of_polling = ptr.get().is_null() || !Arc::ptr_eq(&(*ptr.get()).core(), &weak_arc);
+        std::mem::forget(weak_arc);
         if out_of_polling {
             // It's out of polling process, has to be spawn to global queue.
             // It needs to clone to make it safe as it's unclear whether `self`

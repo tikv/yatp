@@ -189,7 +189,7 @@ impl<T: TaskCell + Send> WeakRemote<T> {
 
     /// Returns the ptr of the inner queue core.
     pub fn as_core_ptr(&self) -> *const QueueCore<T> {
-        self.core.as_ptr()
+        self.core.as_raw()
     }
 }
 
