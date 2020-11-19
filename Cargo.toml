@@ -23,7 +23,7 @@ failpoints = ["fail/failpoints"]
 
 [dev-dependencies]
 criterion = "0.3"
-tokio = { version = "0.2.0", features = ["sync", "rt-threaded"] }
+tokio = { version = "0.3", features = ["sync", "rt-multi-thread"] }
 async-std = "1.0"
 threadpool = "1.0"
 futures-timer = "3"
