@@ -78,17 +78,15 @@ mod yatp_future {
 mod tokio {
     use criterion::*;
     use std::sync::mpsc;
-    use std::sync::Arc;
-    use tokio::runtime::{Builder, Runtime};
+    use tokio::runtime::{Builder, Handle};
 
     pub fn chained_spawn(b: &mut Bencher<'_>, iter_count: usize) {
         let pool = Builder::new_multi_thread()
             .worker_threads(num_cpus::get())
             .build()
             .unwrap();
-        let pool = Arc::new(pool);
 
-        fn iter(handle: Arc<Runtime>, done_tx: mpsc::SyncSender<()>, n: usize) {
+        fn iter(handle: Handle, done_tx: mpsc::SyncSender<()>, n: usize) {
             if n == 0 {
                 done_tx.send(()).unwrap();
             } else {
@@ -103,7 +101,7 @@ mod tokio {
 
         b.iter(move || {
             let done_tx = done_tx.clone();
-            let handle = pool.clone();
+            let handle = pool.handle().clone();
             pool.spawn(async move {
                 iter(handle, done_tx, iter_count);
             });

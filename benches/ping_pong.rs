@@ -119,7 +119,6 @@ mod tokio {
             .worker_threads(num_cpus::get())
             .build()
             .unwrap();
-        let pool = Arc::new(pool);
 
         let (done_tx, done_rx) = mpsc::sync_channel(1000);
         let rem = Arc::new(AtomicUsize::new(0));
@@ -129,7 +128,7 @@ mod tokio {
             let rem = rem.clone();
             rem.store(ping_count, Ordering::Relaxed);
 
-            let handle = pool.clone();
+            let handle = pool.handle().clone();
 
             pool.spawn(async move {
                 for _ in 0..ping_count {
