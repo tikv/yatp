@@ -78,12 +78,11 @@ mod yatp_future {
 mod tokio {
     use criterion::*;
     use std::sync::mpsc;
-    use tokio::runtime::*;
+    use tokio::runtime::{Builder, Handle};
 
     pub fn chained_spawn(b: &mut Bencher<'_>, iter_count: usize) {
-        let pool = Builder::new()
-            .threaded_scheduler()
-            .core_threads(num_cpus::get())
+        let pool = Builder::new_multi_thread()
+            .worker_threads(num_cpus::get())
             .build()
             .unwrap();
 

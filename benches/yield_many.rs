@@ -104,9 +104,8 @@ mod tokio {
     pub fn yield_many(b: &mut Bencher<'_>, yield_count: usize) {
         let tasks = super::TASKS_PER_CPU * num_cpus::get();
         let (tx, rx) = mpsc::sync_channel(tasks);
-        let pool = Builder::new()
-            .threaded_scheduler()
-            .core_threads(num_cpus::get())
+        let pool = Builder::new_multi_thread()
+            .worker_threads(num_cpus::get())
             .build()
             .unwrap();
 

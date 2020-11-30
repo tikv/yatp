@@ -108,9 +108,8 @@ mod tokio {
     pub fn spawn_many(b: &mut Bencher<'_>, spawn_count: usize) {
         let (tx, rx) = mpsc::sync_channel(1000);
         let rem = Arc::new(AtomicUsize::new(0));
-        let pool = Builder::new()
-            .threaded_scheduler()
-            .core_threads(num_cpus::get())
+        let pool = Builder::new_multi_thread()
+            .worker_threads(num_cpus::get())
             .build()
             .unwrap();
 

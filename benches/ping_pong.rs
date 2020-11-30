@@ -115,9 +115,8 @@ mod tokio {
     use tokio::sync::oneshot;
 
     pub fn ping_pong(b: &mut Bencher<'_>, ping_count: usize) {
-        let pool = Builder::new()
-            .threaded_scheduler()
-            .core_threads(num_cpus::get())
+        let pool = Builder::new_multi_thread()
+            .worker_threads(num_cpus::get())
             .build()
             .unwrap();
 
