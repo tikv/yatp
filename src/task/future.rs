@@ -258,7 +258,7 @@ impl crate::pool::Runner for Runner {
             let mut repoll_times = 0;
             loop {
                 task.status.store(POLLING, SeqCst);
-                if let Poll::Ready(_) = (&mut *task.future.get()).as_mut().poll(&mut cx) {
+                if (&mut *task.future.get()).as_mut().poll(&mut cx).is_ready() {
                     task.status.store(COMPLETED, SeqCst);
                     return true;
                 }
