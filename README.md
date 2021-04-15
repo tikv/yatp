@@ -14,8 +14,8 @@ _It is still a work in progress._
   scheduling algorithms like [multi-level feedback queue][MLFQ].
 
 * **Generic**: Yatp is easily adapted to various tasks. Simple callbacks,
-  [futures 0.1] and [std Future] are built-in supported.
+  [futures 0.3] and [std Future] are built-in supported.
 
 [MLFQ]: https://en.wikipedia.org/wiki/Multilevel_feedback_queue
-[futures 0.1]: https://docs.rs/futures/0.1.*/futures/future/trait.Future.html
+[futures 0.3]: https://docs.rs/futures/0.3.*/futures/future/trait.Future.html
 [std Future]: https://doc.rust-lang.org/stable/std/future/trait.Future.html

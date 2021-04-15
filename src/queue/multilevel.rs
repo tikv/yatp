@@ -318,7 +318,7 @@ impl LevelManager {
     }
 
     fn maybe_adjust_chance(&self) {
-        if self.adjusting.compare_and_swap(false, true, SeqCst) {
+        if self.adjusting.compare_exchange(false, true, SeqCst, SeqCst) == Ok(true) {
             return;
         }
         // The statistics may be not so accurate because we cannot load two
@@ -443,7 +443,10 @@ impl TaskElapsedMap {
         let last_cleanup_time = *self.last_cleanup_time.lock().unwrap();
         let do_cleanup = recent().saturating_duration_since(last_cleanup_time)
             > self.cleanup_interval
-            && !self.cleaning_up.compare_and_swap(false, true, SeqCst);
+            && self
+                .cleaning_up
+                .compare_exchange(false, true, SeqCst, SeqCst)
+                == Ok(false);
         let last_cleanup_time = if do_cleanup {
             let old_index = self.new_index.load(SeqCst) ^ 1;
             self.maps[old_index].clear();
