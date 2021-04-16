@@ -321,7 +321,7 @@ impl LevelManager {
         if self
             .adjusting
             .compare_exchange(false, true, SeqCst, SeqCst)
-            .is_ok()
+            .is_err()
         {
             return;
         }
@@ -450,7 +450,7 @@ impl TaskElapsedMap {
             && self
                 .cleaning_up
                 .compare_exchange(false, true, SeqCst, SeqCst)
-                .is_err();
+                .is_ok();
         let last_cleanup_time = if do_cleanup {
             let old_index = self.new_index.load(SeqCst) ^ 1;
             self.maps[old_index].clear();
