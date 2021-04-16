@@ -13,9 +13,8 @@ _It is still a work in progress._
 * **Responsive**: Yatp supports different kinds of task queues with advanced
   scheduling algorithms like [multi-level feedback queue][MLFQ].
 
-* **Generic**: Yatp is easily adapted to various tasks. Simple callbacks,
-  [futures 0.3] and [std Future] are built-in supported.
+* **Generic**: Yatp is easily adapted to various tasks. Simple callbacks and
+  [Future] are built-in supported.
 
 [MLFQ]: https://en.wikipedia.org/wiki/Multilevel_feedback_queue
-[futures 0.3]: https://docs.rs/futures/0.3.*/futures/future/trait.Future.html
-[std Future]: https://doc.rust-lang.org/stable/std/future/trait.Future.html
+[Future]: https://doc.rust-lang.org/stable/std/future/trait.Future.html
