@@ -3,7 +3,7 @@ Yet another thread pool in Rust that is adaptive, responsive and generic.
 
 _It is still a work in progress._
 
-![Build & Test Status](https://github.com/tikv/yatp/actions/workflows/test.yaml/badge.svg?branch=master)
+[![Build & Test Status](https://github.com/tikv/yatp/actions/workflows/test.yaml/badge.svg?branch=master)](https://github.com/tikv/yatp/actions/workflows/test.yaml)
 
 ## Features
 
