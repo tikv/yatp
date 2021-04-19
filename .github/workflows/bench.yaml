@@ -1,0 +1,63 @@
+name: Benchmark
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+jobs:
+  default-benchmark:
+    name: default-benchmark-${{ matrix.os }}-${{ matrix.rust_version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        # Only run nightly on ubuntu-latest
+        rust_version: [stable, nightly]
+        include:
+          - os: windows-latest
+            rust_version: stable
+          - os: macOS-latest
+            rust_version: stable
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust_version }}
+          override: true
+      - name: Bench
+        run: cargo bench --all -- --test
+  all-features-benchmark:
+    name: feature-benchmark-${{ matrix.os }}-${{ matrix.rust_version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        # Only run nightly on ubuntu-latest
+        rust_version: [stable, nightly]
+        include:
+          - os: windows-latest
+            rust_version: stable
+          - os: macOS-latest
+            rust_version: stable
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust_version }}
+          override: true
+      - name: Bench with --all-features
+        run: cargo bench --all --all-features -- --test
