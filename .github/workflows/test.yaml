@@ -1,0 +1,83 @@
+name: Test
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+jobs:
+  format-clippy:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+      - name: Format and clippy
+        continue-on-error: true
+        run: |
+          cargo fmt -- --check
+          cargo clippy -- -D clippy::all
+  default-test:
+    name: default-test-${{ matrix.os }}-${{ matrix.rust_version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        # Only run nightly on ubuntu-latest
+        rust_version: [stable, nightly]
+        include:
+          - os: windows-latest
+            rust_version: stable
+          - os: macOS-latest
+            rust_version: stable
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust_version }}
+          override: true
+      - name: Test
+        run: cargo test --all -- --nocapture
+  all-features-test:
+    name: feature-test-${{ matrix.os }}-${{ matrix.rust_version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        # Only run nightly on ubuntu-latest
+        rust_version: [stable, nightly]
+        include:
+          - os: windows-latest
+            rust_version: stable
+          - os: macOS-latest
+            rust_version: stable
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust_version }}
+          override: true
+      - name: Test with --all-features
+        run: cargo test --all --all-features -- --nocapture
