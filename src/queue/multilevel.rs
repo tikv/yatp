@@ -32,11 +32,11 @@ const DEFAULT_CLEANUP_OLD_MAP_INTERVAL: Duration = Duration::from_secs(10);
 /// When local total elapsed time exceeds this value in microseconds, the local
 /// metrics is flushed to the global atomic metrics and try to trigger chance
 /// adjustment.
-const FLUSH_LOCAL_THRESHOLD_US: i64 = 100_000;
+const FLUSH_LOCAL_THRESHOLD_US: u64 = 100_000;
 
 /// When the incremental total elapsed time exceeds this value, it will try to
 /// adjust level chances and reset the total elapsed time.
-const ADJUST_CHANCE_INTERVAL_US: i64 = 1_000_000;
+const ADJUST_CHANCE_INTERVAL_US: u64 = 1_000_000;
 
 /// When the deviation between the target and the actual level 0 proportion
 /// exceeds this value, level chances need to be adjusted.
@@ -247,7 +247,7 @@ where
         if let Some(running_time) = running_time {
             running_time.inc_by(elapsed);
         }
-        let elapsed_us = elapsed.as_micros() as i64;
+        let elapsed_us = elapsed.as_micros() as u64;
         if level == 0 {
             self.local_level0_elapsed_us.inc_by(elapsed_us);
         }
@@ -282,8 +282,8 @@ struct LevelManager {
     level0_chance: Gauge,
     level0_proportion_target: f64,
     adjusting: AtomicBool,
-    last_level0_elapsed_us: Cell<i64>,
-    last_total_elapsed_us: Cell<i64>,
+    last_level0_elapsed_us: Cell<u64>,
+    last_total_elapsed_us: Cell<u64>,
 }
 
 /// Safety: `last_level0_elapsed_us` and `last_total_elapsed_us` are only used
