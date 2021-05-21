@@ -57,7 +57,7 @@ where
         self.local_queue.push(task_cell);
     }
 
-    pub fn pop(&mut self) -> Option<Pop<T>> {
+    pub fn pop(&mut self, steal_workers: bool) -> Option<Pop<T>> {
         fn into_pop<T>(mut t: T, from_local: bool) -> Pop<T>
         where
             T: TaskCell,
@@ -81,7 +81,7 @@ where
                 Steal::Retry => need_retry = true,
                 _ => {}
             }
-            if !self.stealers.is_empty() {
+            if !self.stealers.is_empty() && steal_workers {
                 let mut found = None;
                 for (idx, stealer) in self.stealers.iter().enumerate() {
                     match stealer.steal_batch_and_pop(&self.local_queue) {
@@ -184,7 +184,7 @@ mod tests {
         let (injector, mut locals) = super::create(1);
         injector.push(MockCell::new(0));
         thread::sleep(SLEEP_DUR);
-        let schedule_time = locals[0].pop().unwrap().schedule_time;
+        let schedule_time = locals[0].pop(true).unwrap().schedule_time;
         assert!(schedule_time.elapsed() >= SLEEP_DUR);
     }
 
@@ -195,14 +195,44 @@ mod tests {
             injector.push(MockCell::new(i));
         }
         let sum: i32 = (0..100)
-            .map(|_| locals[2].pop().unwrap().task_cell.value)
+            .map(|_| locals[2].pop(false).unwrap().task_cell.value)
             .sum();
         assert_eq!(sum, (0..100).sum());
-        assert!(locals.iter_mut().all(|c| c.pop().is_none()));
+        assert!(locals.iter_mut().all(|c| c.pop(true).is_none()));
     }
 
     #[test]
-    fn test_pop_by_steal_others() {
+    fn test_pop_without_stealing_workers() {
+        let (injector, mut locals) = super::create(3);
+        for i in 0..50 {
+            injector.push(MockCell::new(i));
+        }
+        assert!(injector.0.steal_batch(&locals[0].local_queue).is_success());
+        for i in 50..100 {
+            injector.push(MockCell::new(i));
+        }
+        assert!(injector.0.steal_batch(&locals[1].local_queue).is_success());
+
+        let mut sum = 0;
+        while let Some(task) = locals[2].pop(false) {
+            sum += task.task_cell.value;
+        }
+        assert_ne!(
+            sum,
+            (0..100).sum(),
+            "locals[2] shall not pop all tasks without stealing others"
+        );
+
+        for &i in &[0, 1] {
+            while let Some(task) = locals[i].pop(false) {
+                sum += task.task_cell.value;
+            }
+        }
+        assert_eq!(sum, (0..100).sum());
+    }
+
+    #[test]
+    fn test_pop_by_steal_workers() {
         let (injector, mut locals) = super::create(3);
         for i in 0..50 {
             injector.push(MockCell::new(i));
@@ -213,10 +243,10 @@ mod tests {
         }
         assert!(injector.0.steal_batch(&locals[1].local_queue).is_success());
         let sum: i32 = (0..100)
-            .map(|_| locals[2].pop().unwrap().task_cell.value)
+            .map(|_| locals[2].pop(true).unwrap().task_cell.value)
             .sum();
         assert_eq!(sum, (0..100).sum());
-        assert!(locals.iter_mut().all(|c| c.pop().is_none()));
+        assert!(locals.iter_mut().all(|c| c.pop(true).is_none()));
     }
 
     #[test]
@@ -231,7 +261,7 @@ mod tests {
             .map(|mut consumer| {
                 let sum = sum.clone();
                 thread::spawn(move || {
-                    while let Some(pop) = consumer.pop() {
+                    while let Some(pop) = consumer.pop(true) {
                         sum.fetch_add(pop.task_cell.value, Ordering::SeqCst);
                     }
                 })

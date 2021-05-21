@@ -204,7 +204,7 @@ mod tests {
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
-        assert!(locals[0].pop().is_none());
+        assert!(locals[0].pop(true).is_none());
         assert!(rx.recv().is_err());
     }
 
@@ -230,7 +230,7 @@ mod tests {
         );
         assert_eq!(rx.recv().unwrap(), 42);
         assert_eq!(rx.recv().unwrap(), 42);
-        assert!(locals[0].pop().is_some());
+        assert!(locals[0].pop(true).is_some());
         assert!(rx.recv().is_err());
     }
 }
