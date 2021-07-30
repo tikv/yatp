@@ -16,5 +16,6 @@ _It is still a work in progress._
 * **Generic**: Yatp is easily adapted to various tasks. Simple callbacks and
   [Future] are built-in supported.
 
-[MLFQ]: https://en.wikipedia.org/wiki/Multilevel_feedback_queue
-[Future]: https://doc.rust-lang.org/stable/std/future/trait.Future.html
+MLFQ: https://en.wikipedia.org/wiki/Multilevel_feedback_queue
+
+Future: https://doc.rust-lang.org/stable/std/future/trait.Future.html
