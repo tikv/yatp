@@ -9,8 +9,12 @@ use std::cell::{Cell, UnsafeCell};
 use std::future::Future;
 use std::mem::ManuallyDrop;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
-use std::sync::Arc;
+use std::ptr::NonNull;
+use std::sync::atomic::{
+    AtomicU8, AtomicUsize,
+    Ordering::{Acquire, Relaxed, Release, SeqCst},
+};
+use std::sync::{atomic, Arc};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::{borrow::Cow, ptr};
 use std::{fmt, mem};
@@ -24,19 +28,71 @@ struct TaskExtras {
     remote: Option<WeakRemote<TaskCell>>,
 }
 
-/// A [`Future`] task.
-pub struct Task {
+#[repr(C)]
+struct RawTask<F> {
+    ref_count: AtomicUsize,
     status: AtomicU8,
     extras: UnsafeCell<TaskExtras>,
-    future: UnsafeCell<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+    poll_fn: fn(&TaskCell, &mut Context<'_>) -> Poll<()>,
+    data: UnsafeCell<F>,
 }
 
-/// A [`Future`] task cell.
-pub struct TaskCell(Arc<Task>);
+impl<F> RawTask<F>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    fn poll(task: &TaskCell, cx: &mut Context<'_>) -> Poll<()> {
+        let mut typed_ptr: NonNull<RawTask<F>> = task.0.cast();
+        unsafe { Pin::new_unchecked(typed_ptr.as_mut().data.get_mut()).poll(cx) }
+    }
+}
 
-// Safety: It is ensured that `future` and `extras` are always accessed by
-// only one thread at the same time.
-unsafe impl Sync for Task {}
+/// A reference counted `RawTask`.
+pub struct TaskCell(NonNull<RawTask<()>>);
+
+unsafe impl Send for TaskCell {}
+unsafe impl Sync for TaskCell {}
+
+impl TaskCell {
+    fn status(&self) -> &AtomicU8 {
+        unsafe { &self.0.as_ref().status }
+    }
+
+    fn extras(&self) -> &UnsafeCell<TaskExtras> {
+        unsafe { &self.0.as_ref().extras }
+    }
+
+    unsafe fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+        (self.0.as_ref().poll_fn)(self, cx)
+    }
+
+    fn into_raw(self) -> *const () {
+        self.0.as_ptr() as _
+    }
+
+    unsafe fn from_raw(ptr: *const ()) -> Self {
+        TaskCell(NonNull::new_unchecked(ptr as _))
+    }
+}
+
+impl Clone for TaskCell {
+    fn clone(&self) -> Self {
+        unsafe { self.0.as_ref().ref_count.fetch_add(1, Relaxed) };
+        TaskCell(self.0)
+    }
+}
+
+impl Drop for TaskCell {
+    fn drop(&mut self) {
+        unsafe {
+            if self.0.as_ref().ref_count.fetch_sub(1, Release) != 1 {
+                return;
+            }
+        }
+        atomic::fence(Acquire);
+        unsafe { ptr::drop_in_place(self.0.as_ptr()) };
+    }
+}
 
 impl fmt::Debug for TaskCell {
     #[inline]
@@ -69,53 +125,55 @@ const COMPLETED: u8 = 4;
 impl TaskCell {
     /// Creates a [`Future`] task cell that is ready to be polled.
     pub fn new<F: Future<Output = ()> + Send + 'static>(future: F, extras: Extras) -> Self {
-        TaskCell(Arc::new(Task {
+        let inner = Box::new(RawTask {
+            ref_count: AtomicUsize::new(1),
             status: AtomicU8::new(NOTIFIED),
-            future: UnsafeCell::new(Box::pin(future)),
             extras: UnsafeCell::new(TaskExtras {
                 extras,
                 remote: None,
             }),
-        }))
+            poll_fn: RawTask::<F>::poll,
+            data: UnsafeCell::new(future),
+        });
+        unsafe { TaskCell(NonNull::new_unchecked(Box::into_raw(inner) as _)) }
     }
 }
 
 impl crate::queue::TaskCell for TaskCell {
     fn mut_extras(&mut self) -> &mut Extras {
-        unsafe { &mut (*self.0.extras.get()).extras }
+        unsafe { &mut (*self.0.as_ref().extras.get()).extras }
     }
 }
 
 #[inline]
-unsafe fn waker(task: *const Task) -> Waker {
+unsafe fn waker(task: TaskCell) -> Waker {
     Waker::from_raw(RawWaker::new(
-        task as *const (),
+        task.into_raw(),
         &RawWakerVTable::new(clone_raw, wake_raw, wake_ref_raw, drop_raw),
     ))
 }
 
 #[inline]
 unsafe fn clone_raw(this: *const ()) -> RawWaker {
-    let task_cell = clone_task(this as *const Task);
+    let task_cell = clone_task(this);
     RawWaker::new(
-        Arc::into_raw(task_cell.0) as *const (),
+        task_cell.into_raw(),
         &RawWakerVTable::new(clone_raw, wake_raw, wake_ref_raw, drop_raw),
     )
 }
 
 #[inline]
 unsafe fn drop_raw(this: *const ()) {
-    drop(task_cell(this as *const Task))
+    drop(TaskCell::from_raw(this))
 }
 
-unsafe fn wake_impl(task: Cow<'_, Arc<Task>>) {
-    let mut status = task.as_ref().status.load(SeqCst);
+unsafe fn wake_impl(task: Cow<'_, TaskCell>) {
+    let mut status = task.status().load(SeqCst);
     loop {
         match status {
             IDLE => {
                 match task
-                    .as_ref()
-                    .status
+                    .status()
                     .compare_exchange_weak(IDLE, NOTIFIED, SeqCst, SeqCst)
                 {
                     Ok(_) => {
@@ -127,8 +185,7 @@ unsafe fn wake_impl(task: Cow<'_, Arc<Task>>) {
             }
             POLLING => {
                 match task
-                    .as_ref()
-                    .status
+                    .status()
                     .compare_exchange_weak(POLLING, NOTIFIED, SeqCst, SeqCst)
                 {
                     Ok(_) => break,
@@ -142,31 +199,26 @@ unsafe fn wake_impl(task: Cow<'_, Arc<Task>>) {
 
 #[inline]
 unsafe fn wake_raw(this: *const ()) {
-    let task_cell = task_cell(this as *const Task);
-    wake_impl(Cow::Owned(task_cell.0));
+    let task_cell = TaskCell::from_raw(this);
+    wake_impl(Cow::Owned(task_cell));
 }
 
 #[inline]
 unsafe fn wake_ref_raw(this: *const ()) {
-    let task_cell = ManuallyDrop::new(task_cell(this as *const Task));
-    wake_impl(Cow::Borrowed(&task_cell.0));
+    let task_cell = ManuallyDrop::new(TaskCell::from_raw(this));
+    wake_impl(Cow::Borrowed(&task_cell));
 }
 
 #[inline]
-unsafe fn task_cell(task: *const Task) -> TaskCell {
-    TaskCell(Arc::from_raw(task))
-}
-
-#[inline]
-unsafe fn clone_task(task: *const Task) -> TaskCell {
-    let task_cell = task_cell(task);
-    let extras = { &mut *task_cell.0.extras.get() };
+unsafe fn clone_task(task: *const ()) -> TaskCell {
+    let task_cell = TaskCell::from_raw(task);
+    let extras = &mut *task_cell.extras().get();
     if extras.remote.is_none() {
         LOCAL.with(|l| {
             extras.remote = Some((&*l.get()).weak_remote());
         })
     }
-    mem::forget(task_cell.0.clone());
+    mem::forget(task_cell.clone());
     task_cell
 }
 
@@ -175,12 +227,12 @@ thread_local! {
     static LOCAL: Cell<*mut Local<TaskCell>> = Cell::new(std::ptr::null_mut());
 }
 
-unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
+unsafe fn wake_task(task: Cow<'_, TaskCell>, reschedule: bool) {
     LOCAL.with(|ptr| {
         // `wake_task` is only called when the status of the task is IDLE. Before the
         // status is set to IDLE, the runtime will set `remote` in `TaskExtras`. So we
         // can make sure `remote` is not None.
-        let task_remote = (*task.as_ref().extras.get())
+        let task_remote = (*task.extras().get())
             .remote
             .as_ref()
             .expect("core should exist!!!");
@@ -191,14 +243,14 @@ unsafe fn wake_task(task: Cow<'_, Arc<Task>>, reschedule: bool) {
             // It needs to clone to make it safe as it's unclear whether `self`
             // is still used inside method `spawn` after `TaskCell` is dropped.
             if let Some(remote) = task_remote.upgrade() {
-                remote.spawn(TaskCell(task.clone().into_owned()));
+                remote.spawn(task.clone().into_owned());
             }
         } else if reschedule {
             // It's requested explicitly to schedule to global queue.
-            (*ptr.get()).spawn_remote(TaskCell(task.into_owned()));
+            (*ptr.get()).spawn_remote(task.into_owned());
         } else {
             // Otherwise spawns to local queue for best locality.
-            (*ptr.get()).spawn(TaskCell(task.into_owned()));
+            (*ptr.get()).spawn(task.into_owned());
         }
     })
 }
@@ -251,18 +303,18 @@ impl crate::pool::Runner for Runner {
 
     fn handle(&mut self, local: &mut Local<TaskCell>, task_cell: TaskCell) -> bool {
         let scope = Scope::new(local);
-        let task = task_cell.0;
+        let task = TaskCell(task_cell.0);
         unsafe {
-            let waker = ManuallyDrop::new(waker(&*task));
+            let waker = ManuallyDrop::new(waker(task_cell));
             let mut cx = Context::from_waker(&waker);
             let mut repoll_times = 0;
             loop {
-                task.status.store(POLLING, SeqCst);
-                if (&mut *task.future.get()).as_mut().poll(&mut cx).is_ready() {
-                    task.status.store(COMPLETED, SeqCst);
+                task.status().store(POLLING, SeqCst);
+                if task.poll(&mut cx).is_ready() {
+                    task.status().store(COMPLETED, SeqCst);
                     return true;
                 }
-                let extras = { &mut *task.extras.get() };
+                let extras = { &mut *task.extras().get() };
                 if extras.remote.is_none() {
                     // It's possible to avoid assigning remote in some cases, but it requires
                     // at least one atomic load to detect such situation. So here just assign
@@ -271,7 +323,10 @@ impl crate::pool::Runner for Runner {
                         extras.remote = Some((&*l.get()).weak_remote());
                     })
                 }
-                match task.status.compare_exchange(POLLING, IDLE, SeqCst, SeqCst) {
+                match task
+                    .status()
+                    .compare_exchange(POLLING, IDLE, SeqCst, SeqCst)
+                {
                     Ok(_) => return false,
                     Err(NOTIFIED) => {
                         let need_reschedule = NEED_RESCHEDULE.with(|r| r.replace(false));
