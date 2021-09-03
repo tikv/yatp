@@ -92,7 +92,7 @@ impl Drop for TaskCell {
             }
         }
         atomic::fence(Acquire);
-        unsafe { ptr::drop_in_place(self.0.as_ptr()) };
+        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
     }
 }
 
