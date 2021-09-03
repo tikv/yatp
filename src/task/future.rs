@@ -33,7 +33,7 @@ struct RawTask<F> {
     ref_count: AtomicUsize,
     status: AtomicU8,
     extras: UnsafeCell<TaskExtras>,
-    poll_fn: unsafe fn(&TaskCell, &mut Context<'_>) -> Poll<()>,
+    vtable: &'static TaskVTable,
     data: UnsafeCell<F>,
 }
 
@@ -45,6 +45,23 @@ where
         let mut typed_ptr: NonNull<RawTask<F>> = task.0.cast();
         Pin::new_unchecked(typed_ptr.as_mut().data.get_mut()).poll(cx)
     }
+
+    unsafe fn drop_data(task: &TaskCell) {
+        let typed_ptr: NonNull<RawTask<F>> = task.0.cast();
+        ptr::drop_in_place(typed_ptr.as_ref().data.get());
+    }
+
+    fn vtable() -> &'static TaskVTable {
+        &TaskVTable {
+            poll: Self::poll,
+            drop_data: Self::drop_data,
+        }
+    }
+}
+
+struct TaskVTable {
+    poll: unsafe fn(&TaskCell, &mut Context<'_>) -> Poll<()>,
+    drop_data: unsafe fn(&TaskCell),
 }
 
 /// A reference counted `RawTask`.
@@ -63,7 +80,7 @@ impl TaskCell {
     }
 
     unsafe fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
-        (self.0.as_ref().poll_fn)(self, cx)
+        (self.0.as_ref().vtable.poll)(self, cx)
     }
 
     fn into_raw(self) -> *const () {
@@ -90,9 +107,10 @@ impl Drop for TaskCell {
             if self.0.as_ref().ref_count.fetch_sub(1, Release) != 1 {
                 return;
             }
+            atomic::fence(Acquire);
+            (self.0.as_ref().vtable.drop_data)(self);
+            drop(Box::from_raw(self.0.as_ptr()));
         }
-        atomic::fence(Acquire);
-        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
     }
 }
 
@@ -134,7 +152,7 @@ impl TaskCell {
                 extras,
                 remote: None,
             }),
-            poll_fn: RawTask::<F>::poll,
+            vtable: RawTask::<F>::vtable(),
             data: UnsafeCell::new(future),
         });
         unsafe { TaskCell(NonNull::new_unchecked(Box::into_raw(inner) as _)) }
@@ -148,9 +166,9 @@ impl crate::queue::TaskCell for TaskCell {
 }
 
 #[inline]
-unsafe fn waker(task: TaskCell) -> Waker {
+unsafe fn waker(task: &TaskCell) -> Waker {
     Waker::from_raw(RawWaker::new(
-        task.into_raw(),
+        task.0.as_ptr() as _,
         &RawWakerVTable::new(clone_raw, wake_raw, wake_ref_raw, drop_raw),
     ))
 }
@@ -305,18 +323,17 @@ impl crate::pool::Runner for Runner {
 
     fn handle(&mut self, local: &mut Local<TaskCell>, task_cell: TaskCell) -> bool {
         let scope = Scope::new(local);
-        let task = TaskCell(task_cell.0);
         unsafe {
-            let waker = ManuallyDrop::new(waker(task_cell));
+            let waker = ManuallyDrop::new(waker(&task_cell));
             let mut cx = Context::from_waker(&waker);
             let mut repoll_times = 0;
             loop {
-                task.status().store(POLLING, SeqCst);
-                if task.poll(&mut cx).is_ready() {
-                    task.status().store(COMPLETED, SeqCst);
+                task_cell.status().store(POLLING, SeqCst);
+                if task_cell.poll(&mut cx).is_ready() {
+                    task_cell.status().store(COMPLETED, SeqCst);
                     return true;
                 }
-                let extras = { &mut *task.extras().get() };
+                let extras = { &mut *task_cell.extras().get() };
                 if extras.remote.is_none() {
                     // It's possible to avoid assigning remote in some cases, but it requires
                     // at least one atomic load to detect such situation. So here just assign
@@ -325,7 +342,7 @@ impl crate::pool::Runner for Runner {
                         extras.remote = Some((&*l.get()).weak_remote());
                     })
                 }
-                match task
+                match task_cell
                     .status()
                     .compare_exchange(POLLING, IDLE, SeqCst, SeqCst)
                 {
@@ -335,7 +352,7 @@ impl crate::pool::Runner for Runner {
                         if (repoll_times >= self.repoll_limit || need_reschedule)
                             && scope.0.need_preempt()
                         {
-                            wake_task(Cow::Owned(task), need_reschedule);
+                            wake_task(Cow::Owned(task_cell), need_reschedule);
                             return false;
                         } else {
                             repoll_times += 1;
