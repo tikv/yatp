@@ -33,7 +33,7 @@ struct RawTask<F> {
     ref_count: AtomicUsize,
     status: AtomicU8,
     extras: UnsafeCell<TaskExtras>,
-    poll_fn: fn(&TaskCell, &mut Context<'_>) -> Poll<()>,
+    poll_fn: unsafe fn(&TaskCell, &mut Context<'_>) -> Poll<()>,
     data: UnsafeCell<F>,
 }
 
@@ -41,9 +41,9 @@ impl<F> RawTask<F>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    fn poll(task: &TaskCell, cx: &mut Context<'_>) -> Poll<()> {
+    unsafe fn poll(task: &TaskCell, cx: &mut Context<'_>) -> Poll<()> {
         let mut typed_ptr: NonNull<RawTask<F>> = task.0.cast();
-        unsafe { Pin::new_unchecked(typed_ptr.as_mut().data.get_mut()).poll(cx) }
+        Pin::new_unchecked(typed_ptr.as_mut().data.get_mut()).poll(cx)
     }
 }
 
@@ -67,7 +67,9 @@ impl TaskCell {
     }
 
     fn into_raw(self) -> *const () {
-        self.0.as_ptr() as _
+        let ptr = self.0.as_ptr() as _;
+        mem::forget(self);
+        ptr
     }
 
     unsafe fn from_raw(ptr: *const ()) -> Self {
