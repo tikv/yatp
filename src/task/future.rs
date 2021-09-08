@@ -5,8 +5,10 @@
 use crate::pool::{Local, WeakRemote};
 use crate::queue::{Extras, WithExtras};
 
+use std::borrow::Cow;
 use std::cell::{Cell, UnsafeCell};
 use std::future::Future;
+use std::marker::{PhantomData, PhantomPinned};
 use std::mem::ManuallyDrop;
 use std::pin::Pin;
 use std::ptr::NonNull;
@@ -16,8 +18,7 @@ use std::sync::atomic::{
 };
 use std::sync::{atomic, Arc};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::{borrow::Cow, ptr};
-use std::{fmt, mem};
+use std::{fmt, mem, ptr};
 
 /// The default repoll limit for a future runner. See `Runner::new` for
 /// details.
@@ -28,12 +29,19 @@ struct TaskExtras {
     remote: Option<WeakRemote<TaskCell>>,
 }
 
+/// RawTask is a reference-counted `Future` task.
+///
+/// The reference count logic is ported from `std::sync::Arc`.
 #[repr(C)]
 struct RawTask<F> {
+    _pin: PhantomPinned,
+
     ref_count: AtomicUsize,
     status: AtomicU8,
     extras: UnsafeCell<TaskExtras>,
+    /// VTable of the Future.
     vtable: &'static TaskVTable,
+    /// The Future itself.
     data: UnsafeCell<F>,
 }
 
@@ -41,30 +49,40 @@ impl<F> RawTask<F>
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    /// Poll the `Future` in the task.
+    ///
+    /// # Safety
+    ///
+    /// Because we use `Pin::new_unchecked`, the `RawTask` in the `TaskCell` must be pinned.
     unsafe fn poll(task: &TaskCell, cx: &mut Context<'_>) -> Poll<()> {
-        let mut typed_ptr: NonNull<RawTask<F>> = task.0.cast();
-        Pin::new_unchecked(typed_ptr.as_mut().data.get_mut()).poll(cx)
+        let typed_ptr: NonNull<RawTask<F>> = task.0.cast();
+        Pin::new_unchecked(&mut *typed_ptr.as_ref().data.get()).poll(cx)
     }
 
-    unsafe fn drop_data(task: &TaskCell) {
+    /// Drop this `RawTask`.
+    ///
+    /// # Safety
+    ///
+    /// This function should be only called once on a `RawTask`.
+    unsafe fn drop(task: &TaskCell) {
         let typed_ptr: NonNull<RawTask<F>> = task.0.cast();
-        ptr::drop_in_place(typed_ptr.as_ref().data.get());
+        drop(Box::from_raw(typed_ptr.as_ptr()));
     }
 
     fn vtable() -> &'static TaskVTable {
         &TaskVTable {
             poll: Self::poll,
-            drop_data: Self::drop_data,
+            drop: Self::drop,
         }
     }
 }
 
 struct TaskVTable {
     poll: unsafe fn(&TaskCell, &mut Context<'_>) -> Poll<()>,
-    drop_data: unsafe fn(&TaskCell),
+    drop: unsafe fn(&TaskCell),
 }
 
-/// A reference counted `RawTask`.
+/// Wrapper of `RawTask` for easy use.
 pub struct TaskCell(NonNull<RawTask<()>>);
 
 unsafe impl Send for TaskCell {}
@@ -79,8 +97,14 @@ impl TaskCell {
         unsafe { &self.0.as_ref().extras }
     }
 
+    /// # Safety:
+    /// The `RawTask` in the `TaskCell` must be pinned.
     unsafe fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
         (self.0.as_ref().vtable.poll)(self, cx)
+    }
+
+    fn as_raw(&self) -> *const () {
+        self.0.as_ptr() as _
     }
 
     fn into_raw(self) -> *const () {
@@ -95,21 +119,32 @@ impl TaskCell {
 }
 
 impl Clone for TaskCell {
+    /// Makes a clone of the `TaskCell`.
+    ///
+    /// This increases the strong reference count.
     fn clone(&self) -> Self {
+        // Ported from `std::sync::Arc`.
+        // The max reference count check is removed as it is very unlikely to happen.
         unsafe { self.0.as_ref().ref_count.fetch_add(1, Relaxed) };
         TaskCell(self.0)
     }
 }
 
 impl Drop for TaskCell {
+    /// Drops the `TaskCell`.
+    ///
+    /// This will decrement the reference count. If the strong reference
+    /// count reaches zero, we `drop` the inner future.
     fn drop(&mut self) {
+        // Ported from `std::sync::Arc`.
+        // The ThreadSanitizer workaround is removed because `cfg(sanitize = "thread")`
+        // is not supported outside of the compiler.
         unsafe {
             if self.0.as_ref().ref_count.fetch_sub(1, Release) != 1 {
                 return;
             }
             atomic::fence(Acquire);
-            (self.0.as_ref().vtable.drop_data)(self);
-            drop(Box::from_raw(self.0.as_ptr()));
+            (self.0.as_ref().vtable.drop)(self);
         }
     }
 }
@@ -146,6 +181,7 @@ impl TaskCell {
     /// Creates a [`Future`] task cell that is ready to be polled.
     pub fn new<F: Future<Output = ()> + Send + 'static>(future: F, extras: Extras) -> Self {
         let inner = Box::new(RawTask {
+            _pin: PhantomPinned,
             ref_count: AtomicUsize::new(1),
             status: AtomicU8::new(NOTIFIED),
             extras: UnsafeCell::new(TaskExtras {
@@ -165,12 +201,31 @@ impl crate::queue::TaskCell for TaskCell {
     }
 }
 
-#[inline]
-unsafe fn waker(task: &TaskCell) -> Waker {
-    Waker::from_raw(RawWaker::new(
-        task.0.as_ptr() as _,
-        &RawWakerVTable::new(clone_raw, wake_raw, wake_ref_raw, drop_raw),
-    ))
+/// A waker that does not own a reference to the `RawTask`.
+struct WakerRef<'a> {
+    waker: ManuallyDrop<Waker>,
+    _phantom: PhantomData<&'a ()>,
+}
+
+impl<'a> WakerRef<'a> {
+    #[inline]
+    fn new(task_cell: &TaskCell) -> Self {
+        let waker = unsafe {
+            ManuallyDrop::new(Waker::from_raw(RawWaker::new(
+                task_cell.as_raw(),
+                &RawWakerVTable::new(clone_raw, wake_raw, wake_ref_raw, drop_raw),
+            )))
+        };
+        WakerRef {
+            waker,
+            _phantom: PhantomData,
+        }
+    }
+
+    #[inline]
+    fn to_context(&'a self) -> Context<'a> {
+        Context::from_waker(&self.waker)
+    }
 }
 
 #[inline]
@@ -257,7 +312,7 @@ unsafe fn wake_task(task: Cow<'_, TaskCell>, reschedule: bool) {
             .as_ref()
             .expect("core should exist!!!");
         let out_of_polling = ptr.get().is_null()
-            || !ptr::eq(Arc::as_ptr(&(*ptr.get()).core()), task_remote.as_core_ptr());
+            || !ptr::eq(Arc::as_ptr((*ptr.get()).core()), task_remote.as_core_ptr());
         if out_of_polling {
             // It's out of polling process, has to be spawn to global queue.
             // It needs to clone to make it safe as it's unclear whether `self`
@@ -324,8 +379,8 @@ impl crate::pool::Runner for Runner {
     fn handle(&mut self, local: &mut Local<TaskCell>, task_cell: TaskCell) -> bool {
         let scope = Scope::new(local);
         unsafe {
-            let waker = ManuallyDrop::new(waker(&task_cell));
-            let mut cx = Context::from_waker(&waker);
+            let waker_ref = WakerRef::new(&task_cell);
+            let mut cx = waker_ref.to_context();
             let mut repoll_times = 0;
             loop {
                 task_cell.status().store(POLLING, SeqCst);
