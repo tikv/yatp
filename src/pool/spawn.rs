@@ -8,8 +8,10 @@ use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Weak,
+};
 
 /// An usize is used to trace the threads that are working actively.
 /// To save additional memory and atomic operation, the number and
@@ -118,13 +120,6 @@ impl<T> QueueCore<T> {
             }
         }
     }
-
-    /// Returns whether all threads in the pool is working.
-    ///
-    /// It's not necessarily accurate.
-    pub fn busy_hint(&self) -> bool {
-        self.active_workers.load(Ordering::Relaxed) == self.config.max_thread_count
-    }
 }
 
 impl<T: TaskCell + Send> QueueCore<T> {
@@ -146,7 +141,7 @@ impl<T: TaskCell + Send> QueueCore<T> {
 /// Note that thread pool can be shutdown and dropped even not all remotes are
 /// dropped.
 pub struct Remote<T> {
-    core: Arc<QueueCore<T>>,
+    pub(crate) core: Arc<QueueCore<T>>,
 }
 
 impl<T: TaskCell + Send> Remote<T> {
@@ -180,6 +175,34 @@ trait AssertSync: Sync {}
 impl<T: Send> AssertSync for Remote<T> {}
 trait AssertSend: Send {}
 impl<T: Send> AssertSend for Remote<T> {}
+
+/// `WeakRemote` is a weak reference to the inner queue.
+pub(crate) struct WeakRemote<T> {
+    core: Weak<QueueCore<T>>,
+}
+
+impl<T: TaskCell + Send> WeakRemote<T> {
+    /// Upgrade a `WeakRemote` to `Remote`.
+    pub fn upgrade(&self) -> Option<Remote<T>> {
+        self.core.upgrade().map(|core| Remote { core })
+    }
+
+    /// Returns the ptr of the inner queue core.
+    pub fn as_core_ptr(&self) -> *const QueueCore<T> {
+        self.core.as_ptr()
+    }
+}
+
+impl<T> Clone for WeakRemote<T> {
+    fn clone(&self) -> WeakRemote<T> {
+        WeakRemote {
+            core: self.core.clone(),
+        }
+    }
+}
+
+impl<T: Send> AssertSync for WeakRemote<T> {}
+impl<T: Send> AssertSend for WeakRemote<T> {}
 
 /// Spawns tasks to the associated thread pool.
 ///
@@ -215,8 +238,12 @@ impl<T: TaskCell + Send> Local<T> {
 
     /// Gets a remote so that tasks can be spawned from other threads.
     pub fn remote(&self) -> Remote<T> {
-        Remote {
-            core: self.core.clone(),
+        Remote::new(self.core.clone())
+    }
+
+    pub(crate) fn weak_remote(&self) -> WeakRemote<T> {
+        WeakRemote {
+            core: Arc::downgrade(&self.core),
         }
     }
 
@@ -268,11 +295,7 @@ impl<T: TaskCell + Send> Local<T> {
     /// If the pool is not busy, other tasks should not preempt the current running task.
     pub(crate) fn need_preempt(&mut self) -> bool {
         fail_point!("need-preempt", |r| { r.unwrap().parse().unwrap() });
-        if self.core.busy_hint() {
-            self.local_queue.has_tasks_or_pull()
-        } else {
-            false
-        }
+        self.local_queue.has_tasks_or_pull()
     }
 }
 

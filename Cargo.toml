@@ -9,23 +9,24 @@ license = "Apache-2.0"
 repository = "https://github.com/tikv/yatp/"
 
 [dependencies]
-crossbeam-deque = "0.7"
-dashmap = "3.5.1"
-fail = "0.3"
+crossbeam-deque = "0.8"
+dashmap = "4.0"
+fail = "0.4"
 lazy_static = "1"
 num_cpus = "1.0"
-parking_lot_core = "0.7"
-prometheus = "0.8"
-rand = "0.7"
+parking_lot_core = "0.8"
+prometheus = { version = "0.12", default-features = false }
+rand = "0.8"
 
 [features]
 failpoints = ["fail/failpoints"]
 
 [dev-dependencies]
 criterion = "0.3"
-tokio = { version = "0.2.0", features = ["sync", "rt-threaded"] }
+tokio = { version = "1.0", features = ["sync", "rt-multi-thread"] }
 async-std = "1.0"
 threadpool = "1.0"
+futures-timer = "3"
 
 [[bench]]
 name = "spawn_many"
@@ -45,3 +46,4 @@ harness = false
 
 [profile.bench]
 codegen-units = 1
+debug = true

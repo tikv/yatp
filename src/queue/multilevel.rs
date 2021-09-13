@@ -12,11 +12,12 @@ use crate::pool::{Local, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use dashmap::DashMap;
+use fail::fail_point;
 use prometheus::local::LocalIntCounter;
 use prometheus::{Gauge, IntCounter};
 use rand::prelude::*;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{f64, fmt, iter};
@@ -31,11 +32,11 @@ const DEFAULT_CLEANUP_OLD_MAP_INTERVAL: Duration = Duration::from_secs(10);
 /// When local total elapsed time exceeds this value in microseconds, the local
 /// metrics is flushed to the global atomic metrics and try to trigger chance
 /// adjustment.
-const FLUSH_LOCAL_THRESHOLD_US: i64 = 100_000;
+const FLUSH_LOCAL_THRESHOLD_US: u64 = 100_000;
 
 /// When the incremental total elapsed time exceeds this value, it will try to
 /// adjust level chances and reset the total elapsed time.
-const ADJUST_CHANCE_INTERVAL_US: i64 = 1_000_000;
+const ADJUST_CHANCE_INTERVAL_US: u64 = 1_000_000;
 
 /// When the deviation between the target and the actual level 0 proportion
 /// exceeds this value, level chances need to be adjusted.
@@ -246,7 +247,7 @@ where
         if let Some(running_time) = running_time {
             running_time.inc_by(elapsed);
         }
-        let elapsed_us = elapsed.as_micros() as i64;
+        let elapsed_us = elapsed.as_micros() as u64;
         if level == 0 {
             self.local_level0_elapsed_us.inc_by(elapsed_us);
         }
@@ -281,8 +282,8 @@ struct LevelManager {
     level0_chance: Gauge,
     level0_proportion_target: f64,
     adjusting: AtomicBool,
-    last_level0_elapsed_us: Cell<i64>,
-    last_total_elapsed_us: Cell<i64>,
+    last_level0_elapsed_us: Cell<u64>,
+    last_total_elapsed_us: Cell<u64>,
 }
 
 /// Safety: `last_level0_elapsed_us` and `last_total_elapsed_us` are only used
@@ -297,12 +298,12 @@ impl LevelManager {
     {
         let extras = task_cell.mut_extras();
         let task_id = extras.task_id;
-        let running_time = extras
-            .running_time
-            .get_or_insert_with(|| self.task_elapsed_map.get_elapsed(task_id));
         let current_level = match extras.fixed_level {
             Some(level) => level,
             None => {
+                let running_time = extras
+                    .running_time
+                    .get_or_insert_with(|| self.task_elapsed_map.get_elapsed(task_id));
                 let running_time = running_time.as_duration();
                 self.level_time_threshold
                     .iter()
@@ -317,7 +318,11 @@ impl LevelManager {
     }
 
     fn maybe_adjust_chance(&self) {
-        if self.adjusting.compare_and_swap(false, true, SeqCst) {
+        if self
+            .adjusting
+            .compare_exchange(false, true, SeqCst, SeqCst)
+            .is_err()
+        {
             return;
         }
         // The statistics may be not so accurate because we cannot load two
@@ -349,15 +354,15 @@ impl LevelManager {
     }
 }
 
-pub(crate) struct ElapsedTime(IntCounter);
+pub(crate) struct ElapsedTime(AtomicU64);
 
 impl ElapsedTime {
     fn as_duration(&self) -> Duration {
-        Duration::from_micros(self.0.get() as u64)
+        Duration::from_micros(self.0.load(Relaxed) as u64)
     }
 
     fn inc_by(&self, t: Duration) {
-        self.0.inc_by(t.as_micros() as i64);
+        self.0.fetch_add(t.as_micros() as u64, Relaxed);
     }
 
     #[cfg(test)]
@@ -370,7 +375,7 @@ impl ElapsedTime {
 
 impl Default for ElapsedTime {
     fn default() -> ElapsedTime {
-        ElapsedTime(IntCounter::new("_", "_").unwrap())
+        ElapsedTime(AtomicU64::new(0))
     }
 }
 
@@ -414,17 +419,23 @@ impl TaskElapsedMap {
         if let Some(v) = new_map.get(&key) {
             return v.clone();
         }
+        fail_point!("between-read-new-and-read-old");
         let elapsed = match old_map.get(&key) {
             Some(v) => {
-                new_map.insert(key, v.clone());
-                v.clone()
+                let v2 = v.clone();
+                drop(v);
+                fail_point!("between-get-from-old-and-insert-into-new");
+                new_map.insert(key, v2.clone());
+                v2
             }
             None => {
+                fail_point!("before-insert-new");
                 let v = new_map.entry(key).or_default();
                 v.clone()
             }
         };
         TLS_LAST_CLEANUP_TIME.with(|t| {
+            fail_point!("cleanup-in-get-elapsed", |_| ());
             if recent().saturating_duration_since(t.get()) > self.cleanup_interval {
                 self.maybe_cleanup();
             }
@@ -436,7 +447,10 @@ impl TaskElapsedMap {
         let last_cleanup_time = *self.last_cleanup_time.lock().unwrap();
         let do_cleanup = recent().saturating_duration_since(last_cleanup_time)
             > self.cleanup_interval
-            && !self.cleaning_up.compare_and_swap(false, true, SeqCst);
+            && self
+                .cleaning_up
+                .compare_exchange(false, true, SeqCst, SeqCst)
+                .is_ok();
         let last_cleanup_time = if do_cleanup {
             let old_index = self.new_index.load(SeqCst) ^ 1;
             self.maps[old_index].clear();
@@ -629,6 +643,7 @@ mod tests {
     use crate::queue::Extras;
 
     use std::sync::atomic::AtomicU64;
+    use std::sync::mpsc;
     use std::thread;
 
     #[test]
@@ -940,5 +955,58 @@ mod tests {
         manager.maybe_adjust_chance();
         let level0_chance_after = manager.level0_chance.get();
         assert_eq!(level0_chance_before, level0_chance_after);
+    }
+
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
+    #[test]
+    fn test_get_elapsed_deadlock() {
+        let _guard = fail::FailScenario::setup();
+        fail::cfg("between-get-from-old-and-insert-into-new", "delay(500)").unwrap();
+        fail::cfg("before-insert-new", "delay(400)").unwrap();
+        let map = Arc::new(TaskElapsedMap::new(Duration::default()));
+
+        let map2 = map.clone();
+        thread::spawn(move || {
+            // t = 0, new = 0, old = 1, read new fail, read old fail
+            // t = 400, insert into new (0)
+            map2.get_elapsed(1);
+        });
+
+        let map2 = map.clone();
+        thread::spawn(move || {
+            // t = 0, new = 0, old = 1, read new fail
+            // t = 350, read old (1) get
+            // t = 850, insert into new (0)
+            thread::sleep(Duration::from_millis(50));
+            fail::cfg("between-read-new-and-read-old", "delay(300)").unwrap();
+            map2.get_elapsed(1);
+        });
+
+        // t = 100, new = 0, old = 1, clear old (1)
+        // t = 100, swap index, new = 1, old = 0
+        thread::sleep(Duration::from_millis(100));
+        now();
+        map.maybe_cleanup();
+
+        let map3 = map.clone();
+        thread::spawn(move || {
+            // t = 200, new = 1, old = 0, read new fail
+            // t = 200, read old fail, insert into 1
+            thread::sleep(Duration::from_millis(200));
+            fail::remove("between-read-new-and-read-old");
+            fail::remove("before-insert-new");
+            map3.get_elapsed(1);
+        });
+
+        let map4 = map.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            // t = 150, new = 1, old = 0, read new get none
+            // t = 450, read old (0) get
+            thread::sleep(Duration::from_millis(150));
+            map4.get_elapsed(1);
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 }

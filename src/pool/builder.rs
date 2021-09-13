@@ -3,7 +3,7 @@
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
 use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
-use crate::queue::{self, LocalQueue, QueueType, TaskCell};
+use crate::queue::{self, multilevel, LocalQueue, QueueType, TaskCell};
 use crate::task::{callback, future};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -94,7 +94,7 @@ where
             );
         }
         ThreadPool {
-            remote: Remote::new(self.core.clone()),
+            remote: Remote::new(self.core),
             threads: Mutex::new(threads),
         }
     }
@@ -231,6 +231,16 @@ impl Builder {
     pub fn build_future_pool(&self) -> ThreadPool<future::TaskCell> {
         let fb = CloneRunnerBuilder(future::Runner::default());
         self.build_with_queue_and_runner(QueueType::SingleLevel, fb)
+    }
+
+    /// Spawns a multilevel future pool.
+    ///
+    /// It setups the pool with multi level queue.
+    pub fn build_multilevel_future_pool(&self) -> ThreadPool<future::TaskCell> {
+        let fb = CloneRunnerBuilder(future::Runner::default());
+        let queue_builder = multilevel::Builder::new(multilevel::Config::default());
+        let runner_builder = queue_builder.runner_builder(fb);
+        self.build_with_queue_and_runner(QueueType::Multilevel(queue_builder), runner_builder)
     }
 
     /// Spawns the thread pool immediately.
