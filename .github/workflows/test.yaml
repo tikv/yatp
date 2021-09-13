@@ -97,4 +97,4 @@ jobs:
           toolchain: nightly
           override: true
       - name: Run address sanitizer on tests
-        run: cargo test --target x86_64-unknown-linux-gnu --all --all-features -- --nocapture
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --all --all-features -- --nocapture
