@@ -61,3 +61,21 @@ jobs:
           override: true
       - name: Bench with --all-features
         run: cargo bench --all --all-features -- --test
+  sanitizer:
+    name: address-sanitizer-benchmark-ubuntu-latest-nightly
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "-D warnings -Z sanitizer=address"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+          components: rust-src
+      - name: Run address sanitizer on benchmarks
+        run: cargo bench yatp -Zbuild-std --target x86_64-unknown-linux-gnu --all --all-features -- --test

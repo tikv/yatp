@@ -81,3 +81,21 @@ jobs:
           override: true
       - name: Test with --all-features
         run: cargo test --all --all-features -- --nocapture
+  sanitizer:
+    name: address-sanitizer-ubuntu-latest-nightly
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "-D warnings -Z sanitizer=address"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+          components: rust-src
+      - name: Run address sanitizer on tests
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --all --all-features -- --nocapture
