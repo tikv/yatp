@@ -132,7 +132,7 @@ impl<T> QueueCore<T> {
 
     /// Scale workers.
     pub fn scale_workers(&self, new_thread_count: usize) -> bool {
-        let _ = self.l.lock().unwrap();
+        let _l = self.l.lock().unwrap();
         if new_thread_count < self.config.min_thread_count
             || new_thread_count > self.config.max_thread_count
         {
