@@ -12,9 +12,15 @@ use crate::pool::Local;
 /// ```text
 ///   start
 ///     |
-///     | <--- resume
-///     |        |
-///   handle -> pause
+///     | <---------------
+///     |                |
+///   reentrant_start    |
+///     |                |
+///     | <--- resume    | if selected durning scaling up
+///     |        |       |
+///   handle -> pause    |
+///     |                |
+///   reentrant_end ------
 ///     |
 ///    end
 /// ```
@@ -30,6 +36,13 @@ pub trait Runner {
     /// It's guaranteed to be the first method to call before anything else.
     fn start(&mut self, _local: &mut Local<Self::TaskCell>) {}
 
+    /// Called when the runner's thread re-participate in scheduling.
+    ///
+    /// It's used in the scenario of the scale workers. It will treat this
+    /// thread as a new thread. It's guaranteed to be called after `start`,
+    /// before others else.
+    fn reentrant_start(&mut self, _local: &mut Local<Self::TaskCell>) {}
+
     /// Called when a task needs to be handled.
     ///
     /// It's possible that a task can't be finished in a single execution, in
@@ -44,6 +57,16 @@ pub trait Runner {
 
     /// Called when the runner is woken up.
     fn resume(&mut self, _local: &mut Local<Self::TaskCell>) {}
+
+    /// Called when the runner is about to be removed from scheduler.
+    ///
+    /// It's used in the scenario of the scale workers. It will treat this
+    /// thread as a dead thread. It's guaranteed that if this thread is not
+    /// selected by scaling up, no other methods will be called after this
+    /// method, unless the thread pool is shutdown down, in which case `end`
+    /// will be the last method called. Otherwise it's regarded as a new
+    /// thread, will re-run from `reetrant_start`.
+    fn reentrant_end(&mut self, _local: &mut Local<Self::TaskCell>) {}
 
     /// Called when the runner is about to be destroyed.
     ///

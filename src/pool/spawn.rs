@@ -10,7 +10,7 @@ use fail::fail_point;
 use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Weak,
+    Arc, Mutex, Weak,
 };
 
 /// An usize is used to trace the threads that are working actively.
@@ -38,7 +38,11 @@ pub fn is_shutdown(cnt: usize) -> bool {
 pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     active_workers: AtomicUsize,
+    core_workers: AtomicUsize,
     config: SchedConfig,
+    // Only used to protect the scale_workers method to avoid multiple threads
+    // from adjusting the thread pool state at the same time
+    l: Mutex<()>,
 }
 
 impl<T> QueueCore<T> {
@@ -46,7 +50,9 @@ impl<T> QueueCore<T> {
         QueueCore {
             global_queue,
             active_workers: AtomicUsize::new(config.max_thread_count << WORKER_COUNT_SHIFT),
+            core_workers: AtomicUsize::new(config.max_thread_count),
             config,
+            l: Mutex::new(()),
         }
     }
 
@@ -56,7 +62,9 @@ impl<T> QueueCore<T> {
     /// the action.
     pub fn ensure_workers(&self, source: usize) {
         let cnt = self.active_workers.load(Ordering::SeqCst);
-        if (cnt >> WORKER_COUNT_SHIFT) >= self.config.max_thread_count || is_shutdown(cnt) {
+        if (cnt >> WORKER_COUNT_SHIFT) >= self.config.core_thread_count.load(Ordering::SeqCst)
+            || is_shutdown(cnt)
+        {
             return;
         }
 
@@ -74,6 +82,7 @@ impl<T> QueueCore<T> {
         let addr = self as *const QueueCore<T> as usize;
         unsafe {
             parking_lot_core::unpark_all(addr, UnparkToken(source));
+            parking_lot_core::unpark_all(addr | 1, UnparkToken(source));
         }
     }
 
@@ -120,6 +129,68 @@ impl<T> QueueCore<T> {
             }
         }
     }
+
+    /// Scale workers.
+    pub fn scale_workers(&self, new_thread_count: usize) -> bool {
+        let _ = self.l.lock().unwrap();
+        if new_thread_count < self.config.min_thread_count
+            || new_thread_count > self.config.max_thread_count
+        {
+            return false;
+        }
+
+        let current_thread_count = self
+            .config
+            .core_thread_count
+            .swap(new_thread_count, Ordering::SeqCst);
+        let gap = new_thread_count as isize - current_thread_count as isize;
+        if gap > 0 {
+            let addr = self as *const QueueCore<T> as usize | 1;
+            for _ in 0..gap {
+                unsafe {
+                    parking_lot_core::unpark_one(addr, |_| UnparkToken(0));
+                }
+            }
+            self.core_workers.store(new_thread_count, Ordering::SeqCst);
+        } else {
+            let addr = self as *const QueueCore<T> as usize;
+            unsafe {
+                parking_lot_core::unpark_all(addr, UnparkToken(0));
+            }
+        }
+        true
+    }
+
+    pub fn need_to_park_worker(&self) -> bool {
+        let mut core_workers = self.core_workers.load(Ordering::SeqCst);
+        let core_thread_count = self.config.core_thread_count.load(Ordering::SeqCst);
+        if core_workers <= core_thread_count {
+            return false;
+        }
+        loop {
+            match self.core_workers.compare_exchange_weak(
+                core_workers,
+                core_workers - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(n) => {
+                    if n > core_thread_count {
+                        return true;
+                    } else {
+                        return false;
+                    }
+                }
+                Err(n) => {
+                    if n == core_thread_count {
+                        return false;
+                    } else {
+                        core_workers = n;
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<T: TaskCell + Send> QueueCore<T> {
@@ -153,6 +224,11 @@ impl<T: TaskCell + Send> Remote<T> {
     pub fn spawn(&self, task: impl WithExtras<T>) {
         let t = task.with_extras(|| self.core.default_extras());
         self.core.push(0, t);
+    }
+
+    /// Scales workers of the thread pool.
+    pub fn scale_workers(&self, new_thread_count: usize) -> bool {
+        self.core.scale_workers(new_thread_count)
     }
 
     pub(crate) fn stop(&self) {
@@ -251,8 +327,8 @@ impl<T: TaskCell + Send> Local<T> {
         &self.core
     }
 
-    pub(crate) fn pop(&mut self) -> Option<Pop<T>> {
-        self.local_queue.pop()
+    pub(crate) fn pop(&mut self, need_steal: bool) -> Option<Pop<T>> {
+        self.local_queue.pop(need_steal)
     }
 
     /// Pops a task from the queue.
@@ -271,7 +347,7 @@ impl<T: TaskCell + Send> Local<T> {
                     if !self.core.mark_sleep() {
                         return false;
                     }
-                    task = self.local_queue.pop();
+                    task = self.local_queue.pop(true);
                     task.is_none()
                 },
                 || {},
@@ -295,6 +371,39 @@ impl<T: TaskCell + Send> Local<T> {
     pub(crate) fn need_preempt(&mut self) -> bool {
         fail_point!("need-preempt", |r| { r.unwrap().parse().unwrap() });
         self.local_queue.has_tasks_or_pull()
+    }
+
+    /// Returns whether the worker is runnable.
+    pub(crate) fn runnable(&mut self) -> bool {
+        !self.core().need_to_park_worker()
+    }
+
+    /// Sleep if the current worker is not runnable
+    pub(crate) fn sleep(&mut self) {
+        let address = &*self.core as *const QueueCore<T> as usize | 1;
+        let id = self.id;
+
+        let res = unsafe {
+            parking_lot_core::park(
+                address,
+                || {
+                    if !self.core.mark_sleep() {
+                        return false;
+                    }
+                    true
+                },
+                || {},
+                |_, _| {},
+                ParkToken(id),
+                None,
+            )
+        };
+        match res {
+            ParkResult::Unparked(_) | ParkResult::Invalid => {
+                self.core.mark_woken();
+            }
+            ParkResult::TimedOut => unreachable!(),
+        }
     }
 }
 

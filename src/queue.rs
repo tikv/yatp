@@ -93,10 +93,10 @@ impl<T: TaskCell + Send> LocalQueue<T> {
 
     /// Gets a task cell from the queue. Returns `None` if there is no task cell
     /// available.
-    pub fn pop(&mut self) -> Option<Pop<T>> {
+    pub fn pop(&mut self, need_steal: bool) -> Option<Pop<T>> {
         match &mut self.0 {
-            LocalQueueInner::SingleLevel(q) => q.pop(),
-            LocalQueueInner::Multilevel(q) => q.pop(),
+            LocalQueueInner::SingleLevel(q) => q.pop(need_steal),
+            LocalQueueInner::Multilevel(q) => q.pop(need_steal),
         }
     }
 

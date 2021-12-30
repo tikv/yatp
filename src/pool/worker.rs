@@ -25,7 +25,7 @@ where
         // Wait some time before going to sleep, which is more expensive.
         let mut spin = SpinWait::new();
         loop {
-            if let Some(t) = self.local.pop() {
+            if let Some(t) = self.local.pop(true) {
                 return Some(t);
             }
             if !spin.spin() {
@@ -39,18 +39,41 @@ where
     }
 
     pub fn run(mut self) {
-        self.runner.start(&mut self.local);
-        while !self.local.core().is_shutdown() {
-            let task = match self.pop() {
-                Some(t) => t,
-                None => continue,
-            };
-            self.runner.handle(&mut self.local, task.task_cell);
+        if !self.local.runnable() {
+            self.local.sleep();
         }
-        self.runner.end(&mut self.local);
+        self.runner.start(&mut self.local);
+        loop {
+            self.runner.reentrant_start(&mut self.local);
+            while !self.local.core().is_shutdown() {
+                let task = match self.pop() {
+                    Some(t) => t,
+                    None => continue,
+                };
+                self.runner.handle(&mut self.local, task.task_cell);
+                if !self.local.runnable() {
+                    break;
+                }
+            }
+            self.runner.reentrant_end(&mut self.local);
 
-        // Drain all futures in the queue
-        while self.local.pop().is_some() {}
+            // If this worker should go to sleep, spawn all futures to remote
+            while let Some(t) = self.local.pop(false) {
+                if self.local.core().is_shutdown() {
+                    continue;
+                }
+                self.local.spawn_remote(t.task_cell)
+            }
+
+            // If pool already shutdown, drain all futures in the queue
+            if self.local.core().is_shutdown() {
+                while self.local.pop(true).is_some() {}
+                self.runner.end(&mut self.local);
+                break;
+            } else {
+                self.local.sleep();
+            }
+        }
     }
 }
 

@@ -97,7 +97,7 @@ where
         self.local_queue.push(task_cell);
     }
 
-    pub(super) fn pop(&mut self) -> Option<Pop<T>> {
+    pub(super) fn pop(&mut self, mut need_retry: bool) -> Option<Pop<T>> {
         fn into_pop<T>(mut t: T, from_local: bool) -> Pop<T>
         where
             T: TaskCell,
@@ -114,7 +114,6 @@ where
             return Some(into_pop(t, true));
         }
         let mut rng = thread_rng();
-        let mut need_retry = true;
         let level0_chance = self.manager.level0_chance.get();
         while need_retry {
             need_retry = false;
@@ -732,7 +731,7 @@ mod tests {
         let (injector, mut locals) = builder.build(1);
         injector.push(MockTask::new(0, Extras::multilevel_default()));
         thread::sleep(SLEEP_DUR);
-        let schedule_time = locals[0].pop().unwrap().schedule_time;
+        let schedule_time = locals[0].pop(true).unwrap().schedule_time;
         assert!(schedule_time.elapsed() >= SLEEP_DUR);
     }
 
@@ -818,10 +817,10 @@ mod tests {
             injector.push(MockTask::new(i, Extras::multilevel_default()));
         }
         let sum: u64 = (0..100)
-            .map(|_| locals[2].pop().unwrap().task_cell.sleep_ms)
+            .map(|_| locals[2].pop(true).unwrap().task_cell.sleep_ms)
             .sum();
         assert_eq!(sum, (0..100).sum());
-        assert!(locals.iter_mut().all(|c| c.pop().is_none()));
+        assert!(locals.iter_mut().all(|c| c.pop(true).is_none()));
     }
 
     #[test]
@@ -841,10 +840,10 @@ mod tests {
             .steal_batch(&locals[1].local_queue)
             .is_success());
         let sum: u64 = (0..100)
-            .map(|_| locals[2].pop().unwrap().task_cell.sleep_ms)
+            .map(|_| locals[2].pop(true).unwrap().task_cell.sleep_ms)
             .sum();
         assert_eq!(sum, (0..100).sum());
-        assert!(locals.iter_mut().all(|c| c.pop().is_none()));
+        assert!(locals.iter_mut().all(|c| c.pop(true).is_none()));
     }
 
     #[test]
@@ -860,7 +859,7 @@ mod tests {
             .map(|mut consumer| {
                 let sum = sum.clone();
                 thread::spawn(move || {
-                    while let Some(pop) = consumer.pop() {
+                    while let Some(pop) = consumer.pop(true) {
                         sum.fetch_add(pop.task_cell.sleep_ms, SeqCst);
                     }
                 })
@@ -881,7 +880,7 @@ mod tests {
         let mut runner = runner_builder.build();
 
         remote.spawn(MockTask::new(100, Extras::new_multilevel(1, None)));
-        if let Some(Pop { task_cell, .. }) = locals[0].pop() {
+        if let Some(Pop { task_cell, .. }) = locals[0].pop(true) {
             assert!(runner.handle(&mut locals[0], task_cell));
         }
         assert!(
