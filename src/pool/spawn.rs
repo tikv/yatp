@@ -82,7 +82,7 @@ impl<T> QueueCore<T> {
         let addr = self as *const QueueCore<T> as usize;
         unsafe {
             parking_lot_core::unpark_all(addr, UnparkToken(source));
-            parking_lot_core::unpark_all(addr | 1, UnparkToken(source));
+            parking_lot_core::unpark_all(addr + 1, UnparkToken(source));
         }
     }
 
@@ -145,7 +145,7 @@ impl<T> QueueCore<T> {
             .swap(new_thread_count, Ordering::SeqCst);
         let gap = new_thread_count as isize - current_thread_count as isize;
         if gap > 0 {
-            let addr = self as *const QueueCore<T> as usize | 1;
+            let addr = self as *const QueueCore<T> as usize + 1;
             for _ in 0..gap {
                 unsafe {
                     parking_lot_core::unpark_one(addr, |_| UnparkToken(0));
@@ -380,7 +380,7 @@ impl<T: TaskCell + Send> Local<T> {
 
     /// Sleep if the current worker is not runnable
     pub(crate) fn sleep(&mut self) {
-        let address = &*self.core as *const QueueCore<T> as usize | 1;
+        let address = &*self.core as *const QueueCore<T> as usize + 1;
         let id = self.id;
 
         let res = unsafe {

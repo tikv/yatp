@@ -58,11 +58,10 @@ where
             self.runner.reentrant_end(&mut self.local);
 
             // If this worker should go to sleep, spawn all futures to remote
-            while let Some(t) = self.local.pop(false) {
-                if self.local.core().is_shutdown() {
-                    continue;
+            if !self.local.core().is_shutdown() {
+                while let Some(t) = self.local.pop(false) {
+                    self.local.spawn_remote(t.task_cell)
                 }
-                self.local.spawn_remote(t.task_cell)
             }
 
             // If pool already shutdown, drain all futures in the queue
