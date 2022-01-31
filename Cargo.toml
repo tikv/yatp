@@ -14,7 +14,7 @@ dashmap = "4.0"
 fail = "0.5"
 lazy_static = "1"
 num_cpus = "1.0"
-parking_lot_core = "0.8"
+parking_lot_core = "0.9"
 prometheus = { version = "0.13", default-features = false }
 rand = "0.8"
 
