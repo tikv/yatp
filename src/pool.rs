@@ -34,6 +34,15 @@ impl<T: TaskCell + Send> ThreadPool<T> {
         self.remote.spawn(t);
     }
 
+    /// Scale workers of the thread pool, the new thread count should be
+    /// smaller than the max_thread_count, otherwise it will become no-op
+    /// and return false.
+    ///
+    /// If the pool is shutdown, it becomes no-op.
+    pub fn scale_workers(&self, new_thread_count: usize) -> bool {
+        self.remote.scale_workers(new_thread_count)
+    }
+
     /// Shutdowns the pool.
     ///
     /// Closes the queue and wait for all threads to exit.
