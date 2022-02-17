@@ -34,11 +34,20 @@ impl<T: TaskCell + Send> ThreadPool<T> {
         self.remote.spawn(t);
     }
 
-    /// Scale workers of the thread pool, the new thread count should be
-    /// smaller than the max_thread_count, otherwise it will become no-op
+    /// Scale workers of the thread pool, the new thread count should be less
+    /// than or equal to the max_thread_count, otherwise it will become no-op
     /// and return false.
     ///
     /// If the pool is shutdown, it becomes no-op.
+    ///
+    /// Notice:
+    /// 1. The effect of scaling may be delayed, eg:
+    ///    - Threads run long-term tasks, resulting in inability to scale down in time,
+    ///      until they have no task to process and can sleep;
+    ///    - Scaling up relies on spawning tasks to the thread pool to unpark new threads,
+    ///      so the delay depends on the time interval between scale and spawn;
+    /// 2. If lots of tasks have been spawned before start, all threads (max_thread_count)
+    ///    will run until they can sleep, then scheduled based on core_thread_count;
     pub fn scale_workers(&self, new_thread_count: usize) -> bool {
         self.remote.scale_workers(new_thread_count)
     }
