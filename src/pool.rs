@@ -34,22 +34,24 @@ impl<T: TaskCell + Send> ThreadPool<T> {
         self.remote.spawn(t);
     }
 
-    /// Scale workers of the thread pool, the new thread count should be less
-    /// than or equal to the max_thread_count, otherwise it will become no-op
-    /// and return false.
-    ///
-    /// If the pool is shutdown, it becomes no-op.
+    /// Scale workers of the thread pool, the adjustable range is `min_thread_count`
+    /// to `max_thread_count`, if this value exceeds `max_thread_count` or zero, it
+    /// will be adjusted to `max_thread_count`, if this value is between zero and
+    /// `min_thread_count`, it will be adjusted to `min_thread_count`.
     ///
     /// Notice:
     /// 1. The effect of scaling may be delayed, eg:
-    ///    - Threads run long-term tasks, resulting in inability to scale down in time,
-    ///      until they have no task to process and can sleep;
-    ///    - Scaling up relies on spawning tasks to the thread pool to unpark new threads,
-    ///      so the delay depends on the time interval between scale and spawn;
-    /// 2. If lots of tasks have been spawned before start, all threads (max_thread_count)
-    ///    will run until they can sleep, then scheduled based on core_thread_count;
-    pub fn scale_workers(&self, new_thread_count: usize) -> bool {
-        self.remote.scale_workers(new_thread_count)
+    ///    - Threads run long-term tasks, resulting in inability to scale down in
+    ///      time, until they have no task to process and can sleep;
+    ///    - Scaling up relies on spawning tasks to the thread pool to unpark new
+    ///      threads, so the delay depends on the time interval between scale and
+    ///      spawn;
+    /// 2. If lots of tasks have been spawned before start, there may be more than
+    ///    `core_thread_count` (max up to `max_thread_count`) threads running at a
+    ///    moment until they can sleep (no tasks to run), then scheduled based on
+    ///    `core_thread_count`;
+    pub fn scale_workers(&self, new_thread_count: usize) {
+        self.remote.scale_workers(new_thread_count);
     }
 
     /// Shutdowns the pool.

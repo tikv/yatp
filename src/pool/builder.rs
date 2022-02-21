@@ -159,8 +159,9 @@ impl Builder {
 
     /// Sets the number of threads that can participate in being scheduled
     /// by `Remote` at the same time. It will be checked when building the
-    /// queue, if this value exceeds `max_thread_count`, it will be adjusted
-    /// to `max_thread_count`.
+    /// queue, if this value exceeds `max_thread_count` or zero, it will be
+    /// adjusted to `max_thread_count`, if this value is between zero and
+    /// `min_thread_count` it will be adjusted to `min_thread_count`.
     pub fn core_thread_count(&mut self, count: usize) -> &mut Self {
         if count > 0 {
             self.sched_config
@@ -245,6 +246,10 @@ impl Builder {
             self.sched_config
                 .core_thread_count
                 .store(self.sched_config.max_thread_count, Ordering::SeqCst);
+        } else if core_thread_count < self.sched_config.min_thread_count {
+            self.sched_config
+                .core_thread_count
+                .store(self.sched_config.min_thread_count, Ordering::SeqCst);
         }
         let (injector, local_queues) = queue::build(queue_type, self.sched_config.max_thread_count);
         let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));
