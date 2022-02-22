@@ -175,6 +175,9 @@ fn test_scale_up_workers() {
         .core_thread_count(2)
         .build_callback_pool();
 
+    // Make sure all workers have run and gone to sleep before spawn new tasks
+    thread::sleep(Duration::from_secs(1));
+
     let mut sync_txs = vec![];
     // Block all runnable (`core_thread_count`) threads
     for _ in 0..2 {
@@ -198,7 +201,7 @@ fn test_scale_up_workers() {
     );
     // Scale up one worker
     pool.scale_workers(3);
-    // Due to the current implementation, the scale up cann't be triggered until a new
+    // Due to the current implementation, the scale up can't be triggered until a new
     // task has been spawned, so it should still time out
     assert_eq!(
         rx.recv_timeout(Duration::from_secs(1)),
@@ -238,6 +241,9 @@ fn test_scale_down_workers() {
         .core_thread_count(3)
         .build_callback_pool();
 
+    // Make sure all workers have run and gone to sleep before spawn new tasks
+    thread::sleep(Duration::from_secs(1));
+
     let mut sync_txs = vec![];
     // Block all runnable (`core_thread_count`) threads
     for _ in 0..3 {
@@ -261,7 +267,7 @@ fn test_scale_down_workers() {
 
     // Scale down two workers
     pool.scale_workers(1);
-    // Due to the current implementation, the scale down cann't be triggered until thread
+    // Due to the current implementation, the scale down can't be triggered until thread
     // finished tasks and go to sleep, so wake up them all to finish tasks first.
     for tx in sync_txs {
         tx.send(()).unwrap();
