@@ -7,7 +7,7 @@
 use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
-use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
+use parking_lot_core::{FilterOp, ParkResult, ParkToken, UnparkToken};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Weak,
@@ -56,13 +56,29 @@ impl<T> QueueCore<T> {
     /// the action.
     pub fn ensure_workers(&self, source: usize) {
         let cnt = self.active_workers.load(Ordering::SeqCst);
-        if (cnt >> WORKER_COUNT_SHIFT) >= self.config.max_thread_count || is_shutdown(cnt) {
+        if (cnt >> WORKER_COUNT_SHIFT) >= self.config.core_thread_count.load(Ordering::SeqCst)
+            || is_shutdown(cnt)
+        {
             return;
         }
 
         let addr = self as *const QueueCore<T> as usize;
+        let mut unparked_once = false;
+
         unsafe {
-            parking_lot_core::unpark_one(addr, |_| UnparkToken(source));
+            parking_lot_core::unpark_filter(
+                addr,
+                |p: ParkToken| {
+                    if !unparked_once && p.0 <= self.config.core_thread_count.load(Ordering::SeqCst)
+                    {
+                        unparked_once = true;
+                        FilterOp::Unpark
+                    } else {
+                        FilterOp::Skip
+                    }
+                },
+                |_| UnparkToken(source),
+            );
         }
     }
 
@@ -120,6 +136,18 @@ impl<T> QueueCore<T> {
             }
         }
     }
+
+    /// Scale workers.
+    pub fn scale_workers(&self, mut new_thread_count: usize) {
+        if new_thread_count == 0 || new_thread_count > self.config.max_thread_count {
+            new_thread_count = self.config.max_thread_count;
+        } else if new_thread_count < self.config.min_thread_count {
+            new_thread_count = self.config.min_thread_count;
+        }
+        self.config
+            .core_thread_count
+            .store(new_thread_count, Ordering::SeqCst);
+    }
 }
 
 impl<T: TaskCell + Send> QueueCore<T> {
@@ -153,6 +181,11 @@ impl<T: TaskCell + Send> Remote<T> {
     pub fn spawn(&self, task: impl WithExtras<T>) {
         let t = task.with_extras(|| self.core.default_extras());
         self.core.push(0, t);
+    }
+
+    /// Scales workers of the thread pool.
+    pub fn scale_workers(&self, new_thread_count: usize) {
+        self.core.scale_workers(new_thread_count)
     }
 
     pub(crate) fn stop(&self) {

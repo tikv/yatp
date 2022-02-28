@@ -5,15 +5,22 @@ use crate::pool::worker::WorkerThread;
 use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
 use crate::queue::{self, multilevel, LocalQueue, QueueType, TaskCell};
 use crate::task::{callback, future};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::Duration;
 
 /// Configuration for schedule algorithm.
-#[derive(Clone)]
 pub struct SchedConfig {
     /// The maximum number of running threads at the same time.
     pub max_thread_count: usize,
+    /// The core number of running threads at the same time. It
+    /// is defined as the AtomicUsize because it needs to be used
+    /// to scale the number of workers at runtime, and the adjustable
+    /// range is min_thread_count to max_thread_count.
+    pub core_thread_count: AtomicUsize,
     /// The minimum number of running threads at the same time.
     pub min_thread_count: usize,
     /// The maximum tries to rerun an unfinished task before pushing
@@ -35,12 +42,28 @@ impl Default for SchedConfig {
     fn default() -> SchedConfig {
         SchedConfig {
             max_thread_count: num_cpus::get(),
+            core_thread_count: AtomicUsize::new(0),
             min_thread_count: 1,
             max_inplace_spin: 4,
             max_idle_time: Duration::from_millis(1),
             max_wait_time: Duration::from_millis(1),
             wake_backoff: Duration::from_millis(1),
             alloc_slot_backoff: Duration::from_millis(2),
+        }
+    }
+}
+
+impl Clone for SchedConfig {
+    fn clone(&self) -> Self {
+        SchedConfig {
+            max_thread_count: self.max_thread_count,
+            min_thread_count: self.min_thread_count,
+            core_thread_count: AtomicUsize::new(self.core_thread_count.load(Ordering::SeqCst)),
+            max_inplace_spin: self.max_inplace_spin,
+            max_idle_time: self.max_idle_time,
+            max_wait_time: self.max_wait_time,
+            wake_backoff: self.wake_backoff,
+            alloc_slot_backoff: self.alloc_slot_backoff,
         }
     }
 }
@@ -134,6 +157,20 @@ impl Builder {
         self
     }
 
+    /// Sets the number of threads that can participate in being scheduled
+    /// by `Remote` at the same time. It will be checked when building the
+    /// queue, if this value exceeds `max_thread_count` or zero, it will be
+    /// adjusted to `max_thread_count`, if this value is between zero and
+    /// `min_thread_count` it will be adjusted to `min_thread_count`.
+    pub fn core_thread_count(&mut self, count: usize) -> &mut Self {
+        if count > 0 {
+            self.sched_config
+                .core_thread_count
+                .store(count, Ordering::SeqCst);
+        }
+        self
+    }
+
     /// Sets the maximum tries to rerun an unfinished task before pushing
     /// back to queue.
     pub fn max_inplace_spin(&mut self, count: usize) -> &mut Self {
@@ -204,6 +241,16 @@ impl Builder {
         T: TaskCell + Send,
     {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
+        let core_thread_count = self.sched_config.core_thread_count.load(Ordering::SeqCst);
+        if core_thread_count == 0 || core_thread_count > self.sched_config.max_thread_count {
+            self.sched_config
+                .core_thread_count
+                .store(self.sched_config.max_thread_count, Ordering::SeqCst);
+        } else if core_thread_count < self.sched_config.min_thread_count {
+            self.sched_config
+                .core_thread_count
+                .store(self.sched_config.min_thread_count, Ordering::SeqCst);
+        }
         let (injector, local_queues) = queue::build(queue_type, self.sched_config.max_thread_count);
         let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));
 
