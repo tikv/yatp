@@ -357,7 +357,7 @@ impl LevelManager {
 pub(crate) struct ElapsedTime(AtomicU64);
 
 impl ElapsedTime {
-    fn as_duration(&self) -> Duration {
+    pub(crate) fn as_duration(&self) -> Duration {
         Duration::from_micros(self.0.load(Relaxed) as u64)
     }
 
