@@ -4,7 +4,7 @@ use super::multilevel::ElapsedTime;
 
 use rand::prelude::*;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The extras for the task cells pushed into a queue.
 #[derive(Debug, Clone)]
@@ -54,5 +54,27 @@ impl Extras {
             current_level: 0,
             fixed_level,
         }
+    }
+
+    /// Gets the instant when the task is scheduled.
+    pub fn schedule_time(&self) -> Option<Instant> {
+        self.schedule_time
+    }
+
+    /// Gets the identifier of the task.
+    pub fn task_id(&self) -> u64 {
+        self.task_id
+    }
+
+    /// Gets the time spent on handling this task.
+    pub fn running_time(&self) -> Option<Duration> {
+        self.running_time
+            .as_ref()
+            .map(|elapsed| elapsed.as_duration())
+    }
+
+    /// Gets the level of queue which this task comes from.
+    pub fn current_level(&self) -> u8 {
+        self.current_level
     }
 }
