@@ -9,19 +9,25 @@ use std::time::{Duration, Instant};
 /// The extras for the task cells pushed into a queue.
 #[derive(Debug, Clone)]
 pub struct Extras {
+    pub(crate) start_time: Instant,
     /// The instant when the task cell is pushed to the queue.
     pub(crate) schedule_time: Option<Instant>,
     /// The identifier of the task. Only used in the multilevel task queue.
     pub(crate) task_id: u64,
-    /// The time spent on handling this task. Only used in the multilevel task
-    /// queue.
+    // The total time spent on handling this task.
     pub(crate) running_time: Option<Arc<ElapsedTime>>,
+    /// The total time spent on handling this task. Only used in the multilevel task
+    /// queue. This total time will accumulate the execution time acorss multiple tasks
+    /// with the same task_id.
+    pub(crate) total_running_time: Option<Arc<ElapsedTime>>,
     /// The level of queue which this task comes from. Only used in the
     /// multilevel task queue.
     pub(crate) current_level: u8,
     /// If `fixed_level` is `Some`, this task is always pushed to the given
     /// level. Only used in the multilevel task queue.
     pub(crate) fixed_level: Option<u8>,
+    /// Number of execute times
+    pub(crate) exec_times: u32,
 }
 
 impl Extras {
@@ -29,11 +35,14 @@ impl Extras {
     /// task queue.
     pub fn single_level() -> Extras {
         Extras {
+            start_time: Instant::now(),
             schedule_time: None,
             task_id: 0,
             running_time: None,
+            total_running_time: None,
             current_level: 0,
             fixed_level: None,
+            exec_times: 0,
         }
     }
 
@@ -48,11 +57,14 @@ impl Extras {
     /// queue with custom settings.
     pub fn new_multilevel(task_id: u64, fixed_level: Option<u8>) -> Extras {
         Extras {
+            start_time: Instant::now(),
             schedule_time: None,
             task_id,
-            running_time: None,
+            running_time: Some(Arc::new(ElapsedTime::default())),
+            total_running_time: None,
             current_level: 0,
             fixed_level,
+            exec_times: 0,
         }
     }
 
@@ -68,7 +80,7 @@ impl Extras {
 
     /// Gets the time spent on handling this task.
     pub fn running_time(&self) -> Option<Duration> {
-        self.running_time
+        self.total_running_time
             .as_ref()
             .map(|elapsed| elapsed.as_duration())
     }

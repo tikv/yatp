@@ -13,9 +13,10 @@ use crate::pool::{Local, Runner, RunnerBuilder};
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use dashmap::DashMap;
 use fail::fail_point;
-use prometheus::local::LocalIntCounter;
-use prometheus::{Gauge, IntCounter};
+use prometheus::local::{LocalHistogram, LocalIntCounter};
+use prometheus::{Gauge, Histogram, HistogramOpts, IntCounter};
 use rand::prelude::*;
+use std::array;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Arc, Mutex};
@@ -211,6 +212,10 @@ where
             manager: self.manager.clone(),
             local_level0_elapsed_us: self.manager.level0_elapsed_us.local(),
             local_total_elapsed_us: self.manager.total_elapsed_us.local(),
+            task_execute_duration: self.manager.task_execute_duration.local(),
+            task_wait_duration: self.manager.task_wait_duration.local(),
+            task_poll_duration: std::array::from_fn(|i| self.manager.task_poll_duration[i].local()),
+            task_execute_times: self.manager.task_execute_times.local(),
         }
     }
 }
@@ -224,6 +229,10 @@ pub struct MultilevelRunner<R> {
     manager: Arc<LevelManager>,
     local_level0_elapsed_us: LocalIntCounter,
     local_total_elapsed_us: LocalIntCounter,
+    task_wait_duration: LocalHistogram,
+    task_execute_duration: LocalHistogram,
+    task_poll_duration: [LocalHistogram; LEVEL_NUM],
+    task_execute_times: LocalHistogram,
 }
 
 impl<R, T> Runner for MultilevelRunner<R>
@@ -239,23 +248,44 @@ where
 
     fn handle(&mut self, local: &mut Local<T>, mut task_cell: T) -> bool {
         let extras = task_cell.mut_extras();
-        let running_time = extras.running_time.clone();
-        let level = extras.current_level;
+        let total_running_time = extras.total_running_time.clone();
+        let task_running_time = extras.running_time.clone().unwrap();
+        let start_time = extras.start_time;
+        let level = extras.current_level as usize;
+        extras.exec_times += 1;
+        let exec_times = extras.exec_times;
         let begin = Instant::now();
         let res = self.inner.handle(local, task_cell);
         let elapsed = begin.elapsed();
-        if let Some(running_time) = running_time {
-            running_time.inc_by(elapsed);
-        }
+
+        task_running_time.inc_by(elapsed);
+        self.task_poll_duration[level].observe(elapsed.as_secs_f64());
         let elapsed_us = elapsed.as_micros() as u64;
         if level == 0 {
             self.local_level0_elapsed_us.inc_by(elapsed_us);
+        }
+        // set task execute time metrics
+        if res {
+            let exec_time = task_running_time.as_duration();
+            if let Some(ref running_time) = total_running_time {
+                running_time.inc_by(task_running_time.as_duration());
+            }
+            let wait_time = start_time.elapsed().saturating_sub(exec_time);
+            self.task_wait_duration.observe(wait_time.as_secs_f64());
+            self.task_execute_duration.observe(exec_time.as_secs_f64());
+            self.task_execute_times.observe(exec_times as f64);
         }
         self.local_total_elapsed_us.inc_by(elapsed_us);
         let local_total = self.local_total_elapsed_us.get();
         if local_total > FLUSH_LOCAL_THRESHOLD_US {
             self.local_level0_elapsed_us.flush();
             self.local_total_elapsed_us.flush();
+            self.task_execute_duration.flush();
+            self.task_wait_duration.flush();
+            self.task_execute_times.flush();
+            for h in &self.task_poll_duration {
+                h.flush();
+            }
             self.manager.maybe_adjust_chance();
         }
         res
@@ -284,6 +314,10 @@ struct LevelManager {
     adjusting: AtomicBool,
     last_level0_elapsed_us: Cell<u64>,
     last_total_elapsed_us: Cell<u64>,
+    task_wait_duration: Histogram,
+    task_execute_duration: Histogram,
+    task_poll_duration: [Histogram; LEVEL_NUM],
+    task_execute_times: Histogram,
 }
 
 /// Safety: `last_level0_elapsed_us` and `last_total_elapsed_us` are only used
@@ -302,7 +336,7 @@ impl LevelManager {
             Some(level) => level,
             None => {
                 let running_time = extras
-                    .running_time
+                    .total_running_time
                     .get_or_insert_with(|| self.task_elapsed_map.get_elapsed(task_id));
                 let running_time = running_time.as_duration();
                 self.level_time_threshold
@@ -522,7 +556,15 @@ pub struct Builder {
 impl Builder {
     /// Creates a multilevel task queue builder from the config.
     pub fn new(config: Config) -> Builder {
-        let (level0_elapsed_us, total_elapsed_us, level0_chance) = if let Some(name) = config.name {
+        let (
+            level0_elapsed_us,
+            total_elapsed_us,
+            level0_chance,
+            task_wait_duration,
+            task_execute_duration,
+            task_execute_times,
+            task_poll_duration,
+        ) = if let Some(name) = config.name {
             (
                 MULTILEVEL_LEVEL_ELAPSED
                     .get_metric_with_label_values(&[&name, "0"])
@@ -533,14 +575,33 @@ impl Builder {
                 MULTILEVEL_LEVEL0_CHANCE
                     .get_metric_with_label_values(&[&name])
                     .unwrap(),
+                TASK_WAIT_DURATION
+                    .get_metric_with_label_values(&[&name])
+                    .unwrap(),
+                TASK_EXEC_DURATION
+                    .get_metric_with_label_values(&[&name])
+                    .unwrap(),
+                TASK_EXEC_TIMES
+                    .get_metric_with_label_values(&[&name])
+                    .unwrap(),
+                array::from_fn(|i| {
+                    TASK_POLL_DURATION
+                        .get_metric_with_label_values(&[&name, &format!("{i}")])
+                        .unwrap()
+                }),
             )
         } else {
             (
                 IntCounter::new("_", "_").unwrap(),
                 IntCounter::new("_", "_").unwrap(),
                 Gauge::new("_", "_").unwrap(),
+                Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap(),
+                Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap(),
+                Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap(),
+                array::from_fn(|_| Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap()),
             )
         };
+
         level0_chance.set(INIT_LEVEL0_CHANCE);
         let manager = Arc::new(LevelManager {
             level0_elapsed_us,
@@ -552,6 +613,10 @@ impl Builder {
             adjusting: AtomicBool::new(false),
             last_level0_elapsed_us: Cell::new(0),
             last_total_elapsed_us: Cell::new(0),
+            task_wait_duration,
+            task_execute_duration,
+            task_poll_duration,
+            task_execute_times,
         });
         Builder { manager }
     }
@@ -746,7 +811,7 @@ mod tests {
 
         // Running time is 50us. It should be pushed to level 0.
         let extras = Extras {
-            running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_micros(
+            total_running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_micros(
                 50,
             )))),
             ..Extras::multilevel_default()
@@ -763,7 +828,7 @@ mod tests {
 
         // Running time is 10ms. It should be pushed to level 1.
         let extras = Extras {
-            running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_millis(
+            total_running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_millis(
                 10,
             )))),
             ..Extras::multilevel_default()
@@ -780,7 +845,7 @@ mod tests {
 
         // Running time is 1s. It should be pushed to level 2.
         let extras = Extras {
-            running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_secs(1)))),
+            total_running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_secs(1)))),
             ..Extras::multilevel_default()
         };
         injector.push(MockTask::new(3, extras));
@@ -795,7 +860,7 @@ mod tests {
 
         // Fixed level is set. It should be pushed to the set level.
         let extras = Extras {
-            running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_secs(1)))),
+            total_running_time: Some(Arc::new(ElapsedTime::from_duration(Duration::from_secs(1)))),
             fixed_level: Some(1),
             ..Extras::multilevel_default()
         };
