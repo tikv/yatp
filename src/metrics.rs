@@ -27,6 +27,50 @@ lazy_static! {
     )
     .unwrap();
 
+    /// The total duration of a task waiting in queue.
+    pub static ref TASK_WAIT_DURATION: HistogramVec = HistogramVec::new(
+        new_histogram_opts(
+            "yatp_task_wait_duration",
+            "Bucketed histogram of task wait time in queue",
+            exponential_buckets(0.00001, 2.0, 20).unwrap()
+        ),
+        &["name"]
+    )
+    .unwrap();
+
+    /// Total execute duration of one task.
+    pub static ref TASK_EXEC_DURATION: HistogramVec = HistogramVec::new(
+        new_histogram_opts(
+            "yatp_task_exec_duration",
+            "Bucketed histogram of task total exec time",
+            exponential_buckets(0.00001, 2.0, 20).unwrap()
+        ),
+        &["name"]
+    )
+    .unwrap();
+
+    /// Task's execution time duration one time slice.
+    pub static ref TASK_POLL_DURATION: HistogramVec = HistogramVec::new(
+        new_histogram_opts(
+            "yatp_task_poll_duration",
+            "Bucketed histogram of task exec time of a single poll per level",
+            exponential_buckets(0.00001, 2.0, 20).unwrap()
+        ),
+        &["name", "level"]
+    )
+    .unwrap();
+
+    /// Histogrm for how many times a task be scheduled before finish.
+    pub static ref TASK_EXEC_TIMES: HistogramVec = HistogramVec::new(
+        new_histogram_opts(
+            "yatp_task_execute_times",
+            "Bucketed histogram of task exec times",
+            exponential_buckets(1.0, 2.0, 10).unwrap()
+        ),
+        &["name"]
+    )
+    .unwrap();
+
     static ref NAMESPACE: Mutex<Option<String>> = Mutex::new(None);
 }
 
@@ -43,5 +87,14 @@ fn new_opts(name: &str, help: &str) -> Opts {
     if let Some(ref namespace) = *NAMESPACE.lock().unwrap() {
         opts = opts.namespace(namespace);
     }
+    opts
+}
+
+fn new_histogram_opts(name: &str, help: &str, buckets: Vec<f64>) -> HistogramOpts {
+    let mut opts = HistogramOpts::new(name, help).buckets(buckets);
+    if let Some(ref namespace) = *NAMESPACE.lock().unwrap() {
+        opts = opts.namespace(namespace);
+    }
+
     opts
 }
