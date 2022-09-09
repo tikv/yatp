@@ -39,10 +39,6 @@ const FLUSH_LOCAL_THRESHOLD_US: u64 = 100_000;
 /// adjust level chances and reset the total elapsed time.
 const ADJUST_CHANCE_INTERVAL_US: u64 = 1_000_000;
 
-/// When the deviation between the target and the actual level 0 proportion
-/// exceeds this value, level chances need to be adjusted.
-const ADJUST_CHANCE_THRESHOLD: f64 = 0.05;
-
 /// The initial chance that a level 0 task is scheduled.
 ///
 /// The value is not so important because the actual chance will be adjusted
@@ -50,10 +46,7 @@ const ADJUST_CHANCE_THRESHOLD: f64 = 0.05;
 const INIT_LEVEL0_CHANCE: f64 = 0.8;
 
 const MIN_LEVEL0_CHANCE: f64 = 0.5;
-const MAX_LEVEL0_CHANCE: f64 = 0.98;
-
-/// The amount that the level 0 chance is increased or decreased each time.
-const ADJUST_AMOUNT: f64 = 0.06;
+const MAX_LEVEL0_CHANCE: f64 = 0.9999;
 
 /// The injector of a multilevel task queue.
 pub(crate) struct TaskInjector<T> {
@@ -374,17 +367,37 @@ impl LevelManager {
         self.last_level0_elapsed_us.set(level0);
 
         let current_proportion = level0_diff as f64 / total_diff as f64;
-        let proportion_diff = self.level0_proportion_target - current_proportion;
-        let level0_chance = self.level0_chance.get();
-        let new_chance = if proportion_diff > ADJUST_CHANCE_THRESHOLD {
-            f64::min(level0_chance + ADJUST_AMOUNT, MAX_LEVEL0_CHANCE)
-        } else if proportion_diff < -ADJUST_CHANCE_THRESHOLD {
-            f64::max(level0_chance - ADJUST_AMOUNT, MIN_LEVEL0_CHANCE)
-        } else {
-            level0_chance
-        };
-        self.level0_chance.set(new_chance);
+        let new_level0_chance = calculate_level0_chance(
+            current_proportion,
+            self.level0_proportion_target,
+            self.level0_chance.get(),
+        );
+        self.level0_chance.set(new_level0_chance);
         self.adjusting.store(false, SeqCst);
+    }
+}
+
+fn calculate_level0_chance(
+    current_level0_proportion: f64,
+    target_level0_proportion: f64,
+    current_level0_chance: f64,
+) -> f64 {
+    let target_rest_proportioon = 1.0 - target_level0_proportion;
+    // See https://github.com/tikv/yatp/pull/35 for the explanation of the formula.
+    let new_chance =
+        target_level0_proportion * (1.0 - current_level0_proportion) * current_level0_chance
+            / (target_level0_proportion * target_rest_proportioon
+                - (current_level0_proportion - target_level0_proportion)
+                    * (current_level0_chance - target_rest_proportioon));
+    // Avoid extreme values.
+    // For example, when current_level0_proportion == 1, new_chance will be 0;
+    // when current_level_proportion == 0, new_chance will be 1.
+    if new_chance > MAX_LEVEL0_CHANCE {
+        MAX_LEVEL0_CHANCE
+    } else if new_chance < MIN_LEVEL0_CHANCE {
+        MIN_LEVEL0_CHANCE
+    } else {
+        new_chance
     }
 }
 
@@ -976,15 +989,37 @@ mod tests {
         manager.maybe_adjust_chance();
         let level0_chance_after = manager.level0_chance.get();
         assert!(level0_chance_before > level0_chance_after);
+    }
 
-        // Level 0 running time is roughly equivalent to expected,
-        // level0_chance should not change.
-        let level0_chance_before = manager.level0_chance.get();
-        manager.level0_elapsed_us.inc_by(1_210_000);
-        manager.total_elapsed_us.inc_by(1_500_000);
-        manager.maybe_adjust_chance();
-        let level0_chance_after = manager.level0_chance.get();
-        assert_eq!(level0_chance_before, level0_chance_after);
+    #[test]
+    fn test_calculate_level0_chance() {
+        fn calculate_expected_proportion(
+            level0_avg_time: f64,
+            others_avg_time: f64,
+            level0_chance: f64,
+        ) -> f64 {
+            let level0_time = level0_avg_time * level0_chance;
+            let total_time = level0_time + others_avg_time * (1.0 - level0_chance);
+            level0_time / total_time
+        }
+
+        let level0_avg_time = 50.0;
+        let others_avg_time = 1500.0;
+        let current_level0_chance = 0.98;
+        let target_level0_proportion = 0.8;
+        let current_level0_proportion =
+            calculate_expected_proportion(level0_avg_time, others_avg_time, current_level0_chance);
+        let new_level0_chance = calculate_level0_chance(
+            current_level0_proportion,
+            target_level0_proportion,
+            current_level0_chance,
+        );
+        let new_level0_proportion =
+            calculate_expected_proportion(level0_avg_time, others_avg_time, new_level0_chance);
+        assert!(
+            ((new_level0_proportion - target_level0_proportion) / target_level0_proportion).abs()
+                < 1e-7
+        );
     }
 
     #[cfg_attr(not(feature = "failpoints"), ignore)]
