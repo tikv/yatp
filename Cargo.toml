@@ -9,7 +9,9 @@ license = "Apache-2.0"
 repository = "https://github.com/tikv/yatp/"
 
 [dependencies]
-crossbeam-deque = "0.8"
+# TODO: switch back to stable version when the next version is released.
+crossbeam-deque = {git = "https://github.com/crossbeam-rs/crossbeam", rev="41ed3d948720f26149b2ebeaf58fe8a193134056"}
+#crossbeam-deque = "0.8"
 dashmap = "5.1"
 fail = "0.5"
 lazy_static = "1"
