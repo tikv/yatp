@@ -9,9 +9,7 @@ license = "Apache-2.0"
 repository = "https://github.com/tikv/yatp/"
 
 [dependencies]
-# TODO: switch back to stable version when the next version is released.
-crossbeam-deque = {git = "https://github.com/crossbeam-rs/crossbeam", rev="41ed3d948720f26149b2ebeaf58fe8a193134056"}
-#crossbeam-deque = "0.8"
+crossbeam-deque = "0.8"
 dashmap = "5.1"
 fail = "0.5"
 lazy_static = "1"
@@ -19,6 +17,10 @@ num_cpus = "1.0"
 parking_lot_core = "0.9"
 prometheus = { version = "0.13", default-features = false }
 rand = "0.8"
+
+# TODO: remove this patch after the next version is released.
+[patch.crates-io]
+crossbeam-deque = {git = "https://github.com/crossbeam-rs/crossbeam", rev="41ed3d948720f26149b2ebeaf58fe8a193134056"}
 
 [features]
 failpoints = ["fail/failpoints"]
