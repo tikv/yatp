@@ -410,6 +410,7 @@ impl LevelManager {
 
         let level_0_tasks = (cur_total_tasks_per_level[0] - last_level0_total_tasks) as usize;
         let total_tasks = (cur_total_tasks - last_total_tasks) as usize;
+        // adjust the batch size after meeting enough tasks.
         if total_tasks > ADJUST_LEVEL_STEAL_SIZE_THRESHOLD {
             let new_steal_count = if level_0_tasks == 0 {
                 // level 0 has no tasks, that means the current workloads are all low-priority tasks.
@@ -422,9 +423,9 @@ impl LevelManager {
             };
             self.max_level_queue_steal_size
                 .store(new_steal_count as usize, SeqCst);
-        }
-        for (i, c) in self.last_exec_tasks_per_level.iter().enumerate() {
-            c.set(cur_total_tasks_per_level[i]);
+            for (i, c) in self.last_exec_tasks_per_level.iter().enumerate() {
+                c.set(cur_total_tasks_per_level[i]);
+            }
         }
 
         self.adjusting.store(false, SeqCst);
