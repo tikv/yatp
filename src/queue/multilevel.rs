@@ -55,6 +55,13 @@ const MAX_LEVEL0_CHANCE: f64 = 0.98;
 /// The amount that the level 0 chance is increased or decreased each time.
 const ADJUST_AMOUNT: f64 = 0.06;
 
+/// the default max number of tasks the can steal from each level queue.
+const DEFAULT_STEAL_LIMIT_PER_LEVEL: [usize; LEVEL_NUM] = [64, 16, 1];
+/// the maximum number of tasks that should steal from global queue for level > 0 queue.
+const LEVEL_MAX_QUEUE_MAX_STEAL_SIZE: usize = 16;
+/// the number of tasks threshold to trigger adjust level max steal size.
+const ADJUST_LEVEL_STEAL_SIZE_THRESHOLD: usize = 100;
+
 /// The injector of a multilevel task queue.
 pub(crate) struct TaskInjector<T> {
     level_injectors: Arc<[Injector<T>; LEVEL_NUM]>,
@@ -126,7 +133,7 @@ where
                     .find(|_| rng.gen_ratio(CHANCE_RATIO, CHANCE_RATIO + 1))
                     .unwrap_or(LEVEL_NUM - 1)
             };
-            match self.level_injectors[expected_level].steal_batch_and_pop(&self.local_queue) {
+            match self.steal_from_injector(expected_level) {
                 Steal::Success(t) => return Some(into_pop(t, false)),
                 Steal::Retry => need_retry = true,
                 _ => {}
@@ -149,14 +156,8 @@ where
                     return Some(task);
                 }
             }
-            for injector in self
-                .level_injectors
-                .iter()
-                .chain(&*self.level_injectors)
-                .skip(expected_level + 1)
-                .take(LEVEL_NUM - 1)
-            {
-                match injector.steal_batch_and_pop(&self.local_queue) {
+            for l in expected_level + 1..expected_level + LEVEL_NUM {
+                match self.steal_from_injector(l % LEVEL_NUM) {
                     Steal::Success(t) => return Some(into_pop(t, false)),
                     Steal::Retry => need_retry = true,
                     _ => {}
@@ -164,6 +165,20 @@ where
             }
         }
         None
+    }
+
+    #[inline]
+    fn steal_from_injector(&self, level: usize) -> Steal<T> {
+        // steal one task from level injector, for all level except the max level, we use a different
+        // static max steal size for each level to restrict the max batch size, for the max level, by
+        // default we only steal 1 task, but the dynamically adjusts the limit to avoid performance
+        // regression when there are only low-priority tasks.
+        let steal_limit = if level < LEVEL_NUM - 1 {
+            DEFAULT_STEAL_LIMIT_PER_LEVEL[level]
+        } else {
+            self.manager.max_level_queue_steal_size.load(Relaxed)
+        };
+        self.level_injectors[level].steal_batch_with_limit_and_pop(&self.local_queue, steal_limit)
     }
 
     pub fn has_tasks_or_pull(&mut self) -> bool {
@@ -214,7 +229,7 @@ where
             local_total_elapsed_us: self.manager.total_elapsed_us.local(),
             task_execute_duration: self.manager.task_execute_duration.local(),
             task_wait_duration: self.manager.task_wait_duration.local(),
-            task_poll_duration: std::array::from_fn(|i| self.manager.task_poll_duration[i].local()),
+            task_poll_duration: array::from_fn(|i| self.manager.task_poll_duration[i].local()),
             task_execute_times: self.manager.task_execute_times.local(),
         }
     }
@@ -318,6 +333,8 @@ struct LevelManager {
     task_execute_duration: Histogram,
     task_poll_duration: [Histogram; LEVEL_NUM],
     task_execute_times: Histogram,
+    last_exec_tasks_per_level: [Cell<u64>; LEVEL_NUM],
+    max_level_queue_steal_size: AtomicUsize,
 }
 
 /// Safety: `last_level0_elapsed_us` and `last_total_elapsed_us` are only used
@@ -384,6 +401,33 @@ impl LevelManager {
             level0_chance
         };
         self.level0_chance.set(new_chance);
+
+        let cur_total_tasks_per_level: [u64; LEVEL_NUM] =
+            array::from_fn(|i| self.task_poll_duration[i].get_sample_count());
+        let cur_total_tasks = cur_total_tasks_per_level.iter().sum::<u64>();
+        let last_level0_total_tasks = self.last_exec_tasks_per_level[0].get();
+        let last_total_tasks: u64 = self.last_exec_tasks_per_level.iter().map(|c| c.get()).sum();
+
+        let level_0_tasks = (cur_total_tasks_per_level[0] - last_level0_total_tasks) as usize;
+        let total_tasks = (cur_total_tasks - last_total_tasks) as usize;
+        // adjust the batch size after meeting enough tasks.
+        if total_tasks > ADJUST_LEVEL_STEAL_SIZE_THRESHOLD {
+            let new_steal_count = if level_0_tasks == 0 {
+                // level 0 has no tasks, that means the current workloads are all low-priority tasks.
+                LEVEL_MAX_QUEUE_MAX_STEAL_SIZE
+            } else {
+                // by default level0 contains 80% of all tasks, so in the most common case, only
+                // pop 1 task from level max once, and increases level max batch size when the executed
+                // tasks are more than level0.
+                std::cmp::min(total_tasks / level_0_tasks, LEVEL_MAX_QUEUE_MAX_STEAL_SIZE)
+            };
+            self.max_level_queue_steal_size
+                .store(new_steal_count as usize, SeqCst);
+            for (i, c) in self.last_exec_tasks_per_level.iter().enumerate() {
+                c.set(cur_total_tasks_per_level[i]);
+            }
+        }
+
         self.adjusting.store(false, SeqCst);
     }
 }
@@ -617,6 +661,10 @@ impl Builder {
             task_execute_duration,
             task_poll_duration,
             task_execute_times,
+            last_exec_tasks_per_level: array::from_fn(|_| Cell::new(0)),
+            max_level_queue_steal_size: AtomicUsize::new(
+                DEFAULT_STEAL_LIMIT_PER_LEVEL[LEVEL_NUM - 1],
+            ),
         });
         Builder { manager }
     }

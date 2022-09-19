@@ -290,7 +290,7 @@ unsafe fn clone_task(task: *const ()) -> TaskCell {
     let extras = &mut *task_cell.extras().get();
     if extras.remote.is_none() {
         LOCAL.with(|l| {
-            extras.remote = Some((&*l.get()).weak_remote());
+            extras.remote = Some((*l.get()).weak_remote());
         })
     }
     mem::forget(task_cell.clone());
@@ -394,7 +394,7 @@ impl crate::pool::Runner for Runner {
                     // at least one atomic load to detect such situation. So here just assign
                     // it to make things simple.
                     LOCAL.with(|l| {
-                        extras.remote = Some((&*l.get()).weak_remote());
+                        extras.remote = Some((*l.get()).weak_remote());
                     })
                 }
                 match task_cell
