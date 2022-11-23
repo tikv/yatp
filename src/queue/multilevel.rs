@@ -274,6 +274,9 @@ where
         let elapsed = begin.elapsed();
 
         task_running_time.inc_by(elapsed);
+        if let Some(ref running_time) = total_running_time {
+            running_time.inc_by(elapsed);
+        }
         self.task_poll_duration[level].observe(elapsed.as_secs_f64());
         let elapsed_us = elapsed.as_micros() as u64;
         if level == 0 {
@@ -282,9 +285,6 @@ where
         // set task execute time metrics
         if res {
             let exec_time = task_running_time.as_duration();
-            if let Some(ref running_time) = total_running_time {
-                running_time.inc_by(task_running_time.as_duration());
-            }
             let wait_time = start_time.elapsed().saturating_sub(exec_time);
             self.task_wait_duration.observe(wait_time.as_secs_f64());
             self.task_execute_duration.observe(exec_time.as_secs_f64());
