@@ -487,6 +487,8 @@ mod tests {
         }
         assert!(pq.is_empty());
 
+        // test dynamic level
+
         let mut run_task = |sleep_ms, level| {
             remote.spawn(MockTask::new(sleep_ms, 1));
             let mut task = pq.pop().unwrap().task_cell;
@@ -494,13 +496,9 @@ mod tests {
             runner.handle(&mut local, task);
         };
 
-        // test dynamic level
-        for _i in 0..2 {
-            run_task(3, 0);
-        }
+        run_task(5, 0);
         // after 5ms, the task should be put to level1
         run_task(95, 1);
-
         // after 100ms, the task should be put to level2
         run_task(1, 2);
     }
