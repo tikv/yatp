@@ -28,6 +28,8 @@ pub struct Extras {
     pub(crate) fixed_level: Option<u8>,
     /// Number of execute times
     pub(crate) exec_times: u32,
+    /// The task group id. Used in priority queue.
+    pub(crate) group_id: u64,
 }
 
 impl Extras {
@@ -43,6 +45,7 @@ impl Extras {
             current_level: 0,
             fixed_level: None,
             exec_times: 0,
+            group_id: 0,
         }
     }
 
@@ -62,9 +65,26 @@ impl Extras {
             task_id,
             running_time: Some(Arc::new(ElapsedTime::default())),
             total_running_time: None,
-            current_level: 0,
+            current_level: fixed_level.unwrap_or(0),
             fixed_level,
             exec_times: 0,
+            group_id: 0,
+        }
+    }
+
+    /// Creates an `Extra` for task cells pushed into a priority task queue
+    /// with custom settings.
+    pub fn new_priority(group_id: u64, task_id: u64, fixed_level: Option<u8>) -> Extras {
+        Extras {
+            start_time: Instant::now(),
+            schedule_time: None,
+            task_id,
+            running_time: None,
+            total_running_time: None,
+            current_level: fixed_level.unwrap_or(0),
+            fixed_level,
+            exec_times: 0,
+            group_id,
         }
     }
 
@@ -88,5 +108,10 @@ impl Extras {
     /// Gets the level of queue which this task comes from.
     pub fn current_level(&self) -> u8 {
         self.current_level
+    }
+
+    /// Gets the group id of this task
+    pub fn group_id(&self) -> u64 {
+        self.group_id
     }
 }
