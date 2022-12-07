@@ -10,7 +10,7 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicPtr, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -156,26 +156,22 @@ impl<T: TaskCell + Send + 'static> QueueCore<T> {
     }
 }
 
-/// A holder to store task.
+/// A holder to store task. The slot can be concurrently visit by multiple thread in the skip-list.
 struct Slot<T> {
-    ptr: *mut T,
-    consumed: AtomicBool,
+    ptr: AtomicPtr<T>,
 }
-
-unsafe impl<T: Send> Send for Slot<T> {}
-unsafe impl<T: Send> Sync for Slot<T> {}
 
 impl<T> Slot<T> {
     fn new(value: T) -> Self {
         Self {
-            ptr: Box::into_raw(Box::new(value)),
-            consumed: AtomicBool::new(false),
+            ptr: AtomicPtr::new(Box::into_raw(Box::new(value))),
         }
     }
 
     fn take(&self) -> Option<T> {
-        if !self.consumed.swap(true, Ordering::SeqCst) {
-            unsafe { Some(*Box::from_raw(self.ptr)) }
+        let raw_ptr = self.ptr.swap(std::ptr::null_mut(), Ordering::SeqCst);
+        if !raw_ptr.is_null() {
+            unsafe { Some(*Box::from_raw(raw_ptr)) }
         } else {
             None
         }
