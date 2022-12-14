@@ -10,7 +10,7 @@ repository = "https://github.com/tikv/yatp/"
 
 [dependencies]
 crossbeam-deque = "0.8"
-crossbeam-skiplist = { git = "https://github.com/crossbeam-rs/crossbeam" }
+crossbeam-skiplist = "0.1"
 dashmap = "5.1"
 fail = "0.5"
 lazy_static = "1"

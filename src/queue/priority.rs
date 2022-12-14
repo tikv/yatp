@@ -156,7 +156,8 @@ impl<T: TaskCell + Send + 'static> QueueCore<T> {
     }
 }
 
-/// A holder to store task. The slot can be concurrently visit by multiple thread in the skip-list.
+/// A holder to store task. We wrap the value in an atomic ptr because the return value of pop()
+/// only provide readonly reference to this value, though in our can it's safe to just take it.
 struct Slot<T> {
     ptr: AtomicPtr<T>,
 }
