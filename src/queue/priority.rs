@@ -9,8 +9,9 @@
 //! information.
 
 use std::{
+    cell::RefCell,
     sync::{
-        atomic::{AtomicPtr, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -156,32 +157,24 @@ impl<T: TaskCell + Send + 'static> QueueCore<T> {
     }
 }
 
-/// A holder to store task. We wrap the value in an atomic ptr because the return value of pop()
-/// only provide readonly reference to this value, though in our can it's safe to just take it.
+/// A holder to store task. Wrap the task in a RefCell becuase crossbeam-skip only provide
+/// readonly acess to a popped Entry.
 struct Slot<T> {
-    ptr: AtomicPtr<T>,
+    cell: RefCell<Option<T>>,
 }
+
+// It is safe here because the value is only visited by the thread which calls `pop()`.
+unsafe impl<T: Send> Sync for Slot<T> {}
 
 impl<T> Slot<T> {
     fn new(value: T) -> Self {
         Self {
-            ptr: AtomicPtr::new(Box::into_raw(Box::new(value))),
+            cell: RefCell::new(Some(value)),
         }
     }
 
     fn take(&self) -> Option<T> {
-        let raw_ptr = self.ptr.swap(std::ptr::null_mut(), Ordering::SeqCst);
-        if !raw_ptr.is_null() {
-            unsafe { Some(*Box::from_raw(raw_ptr)) }
-        } else {
-            None
-        }
-    }
-}
-
-impl<T> Drop for Slot<T> {
-    fn drop(&mut self) {
-        self.take();
+        self.cell.take()
     }
 }
 
@@ -350,7 +343,7 @@ impl Builder {
         .collect();
 
         let injector = TaskInjector {
-            queue: queue,
+            queue,
             task_manager: self.manager,
         };
 

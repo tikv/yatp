@@ -405,7 +405,7 @@ impl LevelManager {
                 std::cmp::min(total_tasks / level_0_tasks, LEVEL_MAX_QUEUE_MAX_STEAL_SIZE)
             };
             self.max_level_queue_steal_size
-                .store(new_steal_count as usize, SeqCst);
+                .store(new_steal_count, SeqCst);
             for (i, c) in self.last_exec_tasks_per_level.iter().enumerate() {
                 c.set(cur_total_tasks_per_level[i]);
             }
@@ -457,7 +457,7 @@ pub(crate) struct ElapsedTime(AtomicU64);
 
 impl ElapsedTime {
     pub(crate) fn as_duration(&self) -> Duration {
-        Duration::from_micros(self.0.load(Relaxed) as u64)
+        Duration::from_micros(self.0.load(Relaxed))
     }
 
     pub(super) fn inc_by(&self, t: Duration) {
