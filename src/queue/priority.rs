@@ -9,7 +9,6 @@
 //! information.
 
 use std::{
-    cell::RefCell,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -18,6 +17,7 @@ use std::{
 };
 
 use crossbeam_skiplist::SkipMap;
+use crossbeam_utils::atomic::AtomicCell;
 use prometheus::local::LocalIntCounter;
 use prometheus::IntCounter;
 
@@ -157,19 +157,16 @@ impl<T: TaskCell + Send + 'static> QueueCore<T> {
     }
 }
 
-/// A holder to store task. Wrap the task in a RefCell becuase crossbeam-skip only provide
+/// A holder to store task. Wrap the task in a AtomicCell becuase crossbeam-skip only provide
 /// readonly acess to a popped Entry.
 struct Slot<T> {
-    cell: RefCell<Option<T>>,
+    cell: AtomicCell<Option<T>>,
 }
-
-// It is safe here because the value is only visited by the thread which calls `pop()`.
-unsafe impl<T: Send> Sync for Slot<T> {}
 
 impl<T> Slot<T> {
     fn new(value: T) -> Self {
         Self {
-            cell: RefCell::new(Some(value)),
+            cell: AtomicCell::new(Some(value)),
         }
     }
 

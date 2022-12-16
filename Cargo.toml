@@ -11,6 +11,7 @@ repository = "https://github.com/tikv/yatp/"
 [dependencies]
 crossbeam-deque = "0.8"
 crossbeam-skiplist = "0.1"
+crossbeam-utils = "0.8"
 dashmap = "5.1"
 fail = "0.5"
 lazy_static = "1"
