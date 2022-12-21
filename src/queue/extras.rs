@@ -28,8 +28,8 @@ pub struct Extras {
     pub(crate) fixed_level: Option<u8>,
     /// Number of execute times
     pub(crate) exec_times: u32,
-    /// The task group id. Used in priority queue.
-    pub(crate) group_id: u64,
+    /// The task group name. Used in priority queue.
+    pub(crate) group_name: String,
 }
 
 impl Extras {
@@ -45,7 +45,7 @@ impl Extras {
             current_level: 0,
             fixed_level: None,
             exec_times: 0,
-            group_id: 0,
+            group_name: String::new(),
         }
     }
 
@@ -68,23 +68,7 @@ impl Extras {
             current_level: fixed_level.unwrap_or(0),
             fixed_level,
             exec_times: 0,
-            group_id: 0,
-        }
-    }
-
-    /// Creates an `Extra` for task cells pushed into a priority task queue
-    /// with custom settings.
-    pub fn new_priority(group_id: u64, task_id: u64, fixed_level: Option<u8>) -> Extras {
-        Extras {
-            start_time: Instant::now(),
-            schedule_time: None,
-            task_id,
-            running_time: None,
-            total_running_time: None,
-            current_level: fixed_level.unwrap_or(0),
-            fixed_level,
-            exec_times: 0,
-            group_id,
+            group_name: String::new(),
         }
     }
 
@@ -110,8 +94,13 @@ impl Extras {
         self.current_level
     }
 
-    /// Gets the group id of this task
-    pub fn group_id(&self) -> u64 {
-        self.group_id
+    /// Gets the group name of this task.
+    pub fn group_name(&self) -> &str {
+        &self.group_name
+    }
+
+    /// Set the group name of this task.
+    pub fn set_group_name(&mut self, name: String) {
+        self.group_name = name;
     }
 }
