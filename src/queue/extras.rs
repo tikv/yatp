@@ -28,8 +28,9 @@ pub struct Extras {
     pub(crate) fixed_level: Option<u8>,
     /// Number of execute times
     pub(crate) exec_times: u32,
-    /// The task group name. Used in priority queue.
-    pub(crate) group_name: String,
+    /// Extra metadata of this task. User can use this field to store arbitrary data. It is useful 
+    /// in some case to implement more complext `TaskPriorityProvider` in the priority task queue.
+    pub(crate) metadata: Vec<u8>,
 }
 
 impl Extras {
@@ -45,7 +46,7 @@ impl Extras {
             current_level: 0,
             fixed_level: None,
             exec_times: 0,
-            group_name: String::new(),
+            metadata: Vec::new(),
         }
     }
 
@@ -68,7 +69,7 @@ impl Extras {
             current_level: fixed_level.unwrap_or(0),
             fixed_level,
             exec_times: 0,
-            group_name: String::new(),
+            metadata: Vec::new(),
         }
     }
 
@@ -94,13 +95,18 @@ impl Extras {
         self.current_level
     }
 
-    /// Gets the group name of this task.
-    pub fn group_name(&self) -> &str {
-        &self.group_name
+    /// Gets the metadata of this task.
+    pub fn metadata(&self) -> &[u8] {
+        &self.metadata
+    }
+
+    /// Gets the mutable metadata of this task.
+    pub fn metadata_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.metadata
     }
 
     /// Set the group name of this task.
-    pub fn set_group_name(&mut self, name: String) {
-        self.group_name = name;
+    pub fn set_metadata(&mut self, metadata: Vec<u8>) {
+        self.metadata = metadata;
     }
 }

@@ -290,13 +290,15 @@ impl Builder {
         self.build_with_queue_and_runner(QueueType::Multilevel(queue_builder), runner_builder)
     }
 
+    /// Spawn a priority future pool.
     ///
+    /// It setups the pool with priority queue. Caller must provide a `TaskPriorityProvider` implementation to generate the proper priority value for each spawned task.
     pub fn build_priority_future_pool(
         &self,
-        priority_priovider: Arc<dyn priority::TaskPriorityProvider>,
+        priority_provider: Arc<dyn priority::TaskPriorityProvider>,
     ) -> ThreadPool<future::TaskCell> {
         let fb = CloneRunnerBuilder(future::Runner::default());
-        let queue_builder = priority::Builder::new(priority::Config::default(), priority_priovider);
+        let queue_builder = priority::Builder::new(priority::Config::default(), priority_provider);
         let runner_builder = queue_builder.runner_builder(fb);
         self.build_with_queue_and_runner(QueueType::Priority(queue_builder), runner_builder)
     }

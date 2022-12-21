@@ -1,7 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 //! A priority task queue. Tasks are scheduled based on its priority, tasks with small priority
-//! value will be scheduler earlier than bigger onces.. User should implement The [`TaskPriorityProvider`]
+//! value will be scheduler earlier than bigger onces. User should implement The [`TaskPriorityProvider`]
 //! to provide the priority value for each task. The priority value is fetched from the
 //! [`TaskPriorityProvider`] at each time the task is scheduled.
 //!
@@ -86,11 +86,11 @@ where
 
 /// A trait used to generate priority value for each task.
 pub trait TaskPriorityProvider: Send + Sync + 'static {
-    /// Return a priority value of this task, all tasks in the priority queue is ordered by this value.
+    /// Return a priority value of this task, all tasks in the priority
+    /// queue is ordered by this value.
     fn get_priority(&self, extras: &Extras) -> u64;
 }
 
-///
 #[derive(Clone)]
 struct PriorityTaskManager {
     level_manager: Arc<TaskLevelManager>,
@@ -152,8 +152,8 @@ impl<T: TaskCell + Send + 'static> QueueCore<T> {
     }
 
     #[inline]
-    fn gen_key(&self, weight: u64) -> MapKey {
-        MapKey(weight, self.sequence.fetch_add(1, Ordering::Relaxed))
+    fn gen_key(&self, priority: u64) -> MapKey {
+        MapKey(priority, self.sequence.fetch_add(1, Ordering::Relaxed))
     }
 }
 
@@ -265,8 +265,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Sets the name of the multilevel task queue. Metrics of multilevel
-    /// task queues are available if name is provided.
+    /// Sets the name of the priority task queue. Metrics are available if name is provided.
     pub fn name(mut self, name: Option<impl Into<String>>) -> Self {
         self.name = name.map(Into::into);
         self
@@ -290,7 +289,7 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// Creates a multilevel task queue builder with specified config and [`TaskPriorityProvider`].
+    /// Creates a priority task queue builder with specified config and [`TaskPriorityProvider`].
     pub fn new(config: Config, priority_manager: Arc<dyn TaskPriorityProvider>) -> Builder {
         let Config {
             name,
