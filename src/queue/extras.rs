@@ -105,7 +105,7 @@ impl Extras {
         &mut self.metadata
     }
 
-    /// Set the group name of this task.
+    /// Set the metadata of this task.
     pub fn set_metadata(&mut self, metadata: Vec<u8>) {
         self.metadata = metadata;
     }
