@@ -35,7 +35,8 @@ mod yatp_callback {
 
 mod yatp_future {
     use criterion::*;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc};
+    use yatp::queue::priority::TaskPriorityProvider;
     use yatp::task::future::TaskCell;
     use yatp::Remote;
 
@@ -71,6 +72,20 @@ mod yatp_future {
 
     pub fn chained_spawn_multilevel(b: &mut Bencher<'_>, iter_count: usize) {
         let pool = yatp::Builder::new("chained_spawn").build_multilevel_future_pool();
+        chained_spawn(b, pool, iter_count)
+    }
+
+    pub fn chained_spawn_priority(b: &mut Bencher<'_>, iter_count: usize) {
+        struct ConstantPriorityPrivider;
+
+        impl TaskPriorityProvider for ConstantPriorityPrivider {
+            fn priority_of(&self, _extras: &yatp::queue::Extras) -> u64 {
+                // return a constant value so the queue workes the same as FIFO queue.
+                0
+            }
+        }
+        let pool = yatp::Builder::new("chained_spawn")
+            .build_priority_future_pool(Arc::new(ConstantPriorityPrivider));
         chained_spawn(b, pool, iter_count)
     }
 }
@@ -153,6 +168,9 @@ pub fn chained_spawn(b: &mut Criterion) {
             i,
             |b, i| yatp_future::chained_spawn_multilevel(b, *i),
         );
+        group.bench_with_input(BenchmarkId::new("yatp::future::priority", i), i, |b, i| {
+            yatp_future::chained_spawn_priority(b, *i)
+        });
         group.bench_with_input(BenchmarkId::new("tokio", i), i, |b, i| {
             tokio::chained_spawn(b, *i)
         });

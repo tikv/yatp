@@ -59,22 +59,13 @@ where
     }
 }
 
-/// The local queue is just a proxy of the global queue.
-pub(crate) struct LocalQueue<T> {
-    queue: Arc<QueueCore<T>>,
-    task_manager: PriorityTaskManager,
-}
+/// priority queue does not have local queue, all tasks are always put in the global queue.
+pub(crate) type LocalQueue<T> = TaskInjector<T>;
 
 impl<T> LocalQueue<T>
 where
     T: TaskCell + Send,
 {
-    pub(super) fn push(&mut self, mut task_cell: T) {
-        let priority = self.task_manager.prepare_before_push(&mut task_cell);
-        set_schedule_time(&mut task_cell);
-        self.queue.push(task_cell, priority);
-    }
-
     pub(super) fn pop(&mut self) -> Option<Pop<T>> {
         self.queue.pop()
     }
@@ -88,7 +79,7 @@ where
 pub trait TaskPriorityProvider: Send + Sync + 'static {
     /// Return a priority value of this task, all tasks in the priority
     /// queue is ordered by this value.
-    fn get_priority(&self, extras: &Extras) -> u64;
+    fn priority_of(&self, extras: &Extras) -> u64;
 }
 
 #[derive(Clone)]
@@ -103,7 +94,7 @@ impl PriorityTaskManager {
         T: TaskCell,
     {
         self.level_manager.adjust_task_level(task_cell);
-        self.priority_manager.get_priority(task_cell.mut_extras())
+        self.priority_manager.priority_of(task_cell.mut_extras())
     }
 }
 
@@ -415,7 +406,7 @@ mod tests {
         struct OrderByIdProvider;
 
         impl TaskPriorityProvider for OrderByIdProvider {
-            fn get_priority(&self, extras: &Extras) -> u64 {
+            fn priority_of(&self, extras: &Extras) -> u64 {
                 return extras.task_id();
             }
         }

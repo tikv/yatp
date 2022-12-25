@@ -28,7 +28,7 @@ pub struct Extras {
     pub(crate) fixed_level: Option<u8>,
     /// Number of execute times
     pub(crate) exec_times: u32,
-    /// Extra metadata of this task. User can use this field to store arbitrary data. It is useful 
+    /// Extra metadata of this task. User can use this field to store arbitrary data. It is useful
     /// in some case to implement more complext `TaskPriorityProvider` in the priority task queue.
     pub(crate) metadata: Vec<u8>,
 }
