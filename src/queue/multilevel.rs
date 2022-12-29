@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{f64, fmt, iter};
 
-const LEVEL_NUM: usize = 3;
+/// Number of levels
+pub const LEVEL_NUM: usize = 3;
 
 /// The chance ratio of level 1 and level 2 tasks.
 const CHANCE_RATIO: u32 = 4;
@@ -33,7 +34,7 @@ const DEFAULT_CLEANUP_OLD_MAP_INTERVAL: Duration = Duration::from_secs(10);
 /// When local total elapsed time exceeds this value in microseconds, the local
 /// metrics is flushed to the global atomic metrics and try to trigger chance
 /// adjustment.
-const FLUSH_LOCAL_THRESHOLD_US: u64 = 100_000;
+pub(super) const FLUSH_LOCAL_THRESHOLD_US: u64 = 100_000;
 
 /// When the incremental total elapsed time exceeds this value, it will try to
 /// adjust level chances and reset the total elapsed time.
@@ -322,8 +323,7 @@ where
 struct LevelManager {
     level0_elapsed_us: IntCounter,
     total_elapsed_us: IntCounter,
-    task_elapsed_map: TaskElapsedMap,
-    level_time_threshold: [Duration; LEVEL_NUM - 1],
+    task_level_mgr: TaskLevelManager,
     level0_chance: Gauge,
     level0_proportion_target: f64,
     adjusting: AtomicBool,
@@ -347,25 +347,8 @@ impl LevelManager {
     where
         T: TaskCell,
     {
-        let extras = task_cell.mut_extras();
-        let task_id = extras.task_id;
-        let current_level = match extras.fixed_level {
-            Some(level) => level,
-            None => {
-                let running_time = extras
-                    .total_running_time
-                    .get_or_insert_with(|| self.task_elapsed_map.get_elapsed(task_id));
-                let running_time = running_time.as_duration();
-                self.level_time_threshold
-                    .iter()
-                    .enumerate()
-                    .find(|(_, &threshold)| running_time < threshold)
-                    .map(|(level, _)| level)
-                    .unwrap_or(LEVEL_NUM - 1) as u8
-            }
-        };
-        extras.current_level = current_level;
-        extras.schedule_time = Some(now());
+        self.task_level_mgr.adjust_task_level(task_cell);
+        task_cell.mut_extras().schedule_time = Some(now());
     }
 
     fn maybe_adjust_chance(&self) {
@@ -422,7 +405,7 @@ impl LevelManager {
                 std::cmp::min(total_tasks / level_0_tasks, LEVEL_MAX_QUEUE_MAX_STEAL_SIZE)
             };
             self.max_level_queue_steal_size
-                .store(new_steal_count as usize, SeqCst);
+                .store(new_steal_count, SeqCst);
             for (i, c) in self.last_exec_tasks_per_level.iter().enumerate() {
                 c.set(cur_total_tasks_per_level[i]);
             }
@@ -432,14 +415,52 @@ impl LevelManager {
     }
 }
 
+pub(super) struct TaskLevelManager {
+    task_elapsed_map: TaskElapsedMap,
+    level_time_threshold: [Duration; LEVEL_NUM - 1],
+}
+
+impl TaskLevelManager {
+    pub fn new(level_time_threshold: [Duration; LEVEL_NUM - 1]) -> Self {
+        Self {
+            task_elapsed_map: TaskElapsedMap::default(),
+            level_time_threshold,
+        }
+    }
+
+    pub fn adjust_task_level<T>(&self, task_cell: &mut T)
+    where
+        T: TaskCell,
+    {
+        let extras = task_cell.mut_extras();
+        let task_id = extras.task_id;
+        let current_level = match extras.fixed_level {
+            Some(level) => level,
+            None => {
+                let running_time = extras
+                    .total_running_time
+                    .get_or_insert_with(|| self.task_elapsed_map.get_elapsed(task_id));
+                let running_time = running_time.as_duration();
+                self.level_time_threshold
+                    .iter()
+                    .enumerate()
+                    .find(|(_, &threshold)| running_time < threshold)
+                    .map(|(level, _)| level)
+                    .unwrap_or(LEVEL_NUM - 1) as u8
+            }
+        };
+        extras.current_level = current_level;
+    }
+}
+
 pub(crate) struct ElapsedTime(AtomicU64);
 
 impl ElapsedTime {
     pub(crate) fn as_duration(&self) -> Duration {
-        Duration::from_micros(self.0.load(Relaxed) as u64)
+        Duration::from_micros(self.0.load(Relaxed))
     }
 
-    fn inc_by(&self, t: Duration) {
+    pub(super) fn inc_by(&self, t: Duration) {
         self.0.fetch_add(t.as_micros() as u64, Relaxed);
     }
 
@@ -650,8 +671,7 @@ impl Builder {
         let manager = Arc::new(LevelManager {
             level0_elapsed_us,
             total_elapsed_us,
-            task_elapsed_map: Default::default(),
-            level_time_threshold: config.level_time_threshold,
+            task_level_mgr: TaskLevelManager::new(config.level_time_threshold),
             level0_chance,
             level0_proportion_target: config.level0_proportion_target,
             adjusting: AtomicBool::new(false),
@@ -998,7 +1018,12 @@ mod tests {
             assert!(runner.handle(&mut locals[0], task_cell));
         }
         assert!(
-            manager.task_elapsed_map.get_elapsed(1).as_duration() >= Duration::from_millis(100)
+            manager
+                .task_level_mgr
+                .task_elapsed_map
+                .get_elapsed(1)
+                .as_duration()
+                >= Duration::from_millis(100)
         );
     }
 

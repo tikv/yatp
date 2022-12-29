@@ -28,6 +28,9 @@ pub struct Extras {
     pub(crate) fixed_level: Option<u8>,
     /// Number of execute times
     pub(crate) exec_times: u32,
+    /// Extra metadata of this task. User can use this field to store arbitrary data. It is useful
+    /// in some case to implement more complext `TaskPriorityProvider` in the priority task queue.
+    pub(crate) metadata: Vec<u8>,
 }
 
 impl Extras {
@@ -43,6 +46,7 @@ impl Extras {
             current_level: 0,
             fixed_level: None,
             exec_times: 0,
+            metadata: Vec::new(),
         }
     }
 
@@ -62,9 +66,10 @@ impl Extras {
             task_id,
             running_time: Some(Arc::new(ElapsedTime::default())),
             total_running_time: None,
-            current_level: 0,
+            current_level: fixed_level.unwrap_or(0),
             fixed_level,
             exec_times: 0,
+            metadata: Vec::new(),
         }
     }
 
@@ -88,5 +93,20 @@ impl Extras {
     /// Gets the level of queue which this task comes from.
     pub fn current_level(&self) -> u8 {
         self.current_level
+    }
+
+    /// Gets the metadata of this task.
+    pub fn metadata(&self) -> &[u8] {
+        &self.metadata
+    }
+
+    /// Gets the mutable metadata of this task.
+    pub fn metadata_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.metadata
+    }
+
+    /// Set the metadata of this task.
+    pub fn set_metadata(&mut self, metadata: Vec<u8>) {
+        self.metadata = metadata;
     }
 }

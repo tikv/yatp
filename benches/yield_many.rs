@@ -61,7 +61,8 @@ mod yatp_callback {
 
 mod yatp_future {
     use criterion::*;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc};
+    use yatp::queue::priority::TaskPriorityProvider;
     use yatp::task::future::TaskCell;
 
     fn yield_many(b: &mut Bencher<'_>, pool: yatp::ThreadPool<TaskCell>, yield_count: usize) {
@@ -92,6 +93,19 @@ mod yatp_future {
 
     pub fn yield_many_multilevel(b: &mut Bencher<'_>, yield_count: usize) {
         let pool = yatp::Builder::new("yield_many").build_multilevel_future_pool();
+        yield_many(b, pool, yield_count)
+    }
+
+    pub fn yield_many_priority(b: &mut Bencher<'_>, yield_count: usize) {
+        struct ConstantPriorityPrivider;
+        impl TaskPriorityProvider for ConstantPriorityPrivider {
+            fn priority_of(&self, _extras: &yatp::queue::Extras) -> u64 {
+                // return a constant value so the queue workes the same as FIFO queue.
+                0
+            }
+        }
+        let pool = yatp::Builder::new("yield_many")
+            .build_priority_future_pool(Arc::new(ConstantPriorityPrivider));
         yield_many(b, pool, yield_count)
     }
 }
@@ -167,6 +181,9 @@ pub fn yield_many(b: &mut Criterion) {
             i,
             |b, i| yatp_future::yield_many_multilevel(b, *i),
         );
+        group.bench_with_input(BenchmarkId::new("yatp::future::priority", i), i, |b, i| {
+            yatp_future::yield_many_priority(b, *i)
+        });
         group.bench_with_input(BenchmarkId::new("tokio", i), i, |b, i| {
             tokio::yield_many(b, *i)
         });

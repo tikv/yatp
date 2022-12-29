@@ -53,6 +53,7 @@ mod yatp_future {
     use std::sync::atomic::*;
     use std::sync::*;
     use tokio::sync::oneshot;
+    use yatp::queue::priority::TaskPriorityProvider;
     use yatp::task::future::TaskCell;
 
     fn ping_pong(b: &mut Bencher<'_>, pool: yatp::ThreadPool<TaskCell>, ping_count: usize) {
@@ -103,6 +104,19 @@ mod yatp_future {
 
     pub fn ping_pong_multilevel(b: &mut Bencher<'_>, ping_count: usize) {
         let pool = yatp::Builder::new("ping_pong").build_multilevel_future_pool();
+        ping_pong(b, pool, ping_count)
+    }
+
+    pub fn ping_pong_priority(b: &mut Bencher<'_>, ping_count: usize) {
+        struct ConstantPriorityPrivider;
+        impl TaskPriorityProvider for ConstantPriorityPrivider {
+            fn priority_of(&self, _extras: &yatp::queue::Extras) -> u64 {
+                // return a constant value so the queue workes the same as FIFO queue.
+                0
+            }
+        }
+        let pool = yatp::Builder::new("ping_pong")
+            .build_priority_future_pool(Arc::new(ConstantPriorityPrivider));
         ping_pong(b, pool, ping_count)
     }
 }
@@ -219,6 +233,9 @@ pub fn ping_pong(b: &mut Criterion) {
             i,
             |b, i| yatp_future::ping_pong_multilevel(b, *i),
         );
+        group.bench_with_input(BenchmarkId::new("yatp::future::priority", i), i, |b, i| {
+            yatp_future::ping_pong_priority(b, *i)
+        });
         group.bench_with_input(BenchmarkId::new("tokio", i), i, |b, i| {
             tokio::ping_pong(b, *i)
         });

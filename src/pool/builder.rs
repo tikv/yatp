@@ -3,7 +3,7 @@
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
 use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
-use crate::queue::{self, multilevel, LocalQueue, QueueType, TaskCell};
+use crate::queue::{self, multilevel, priority, LocalQueue, QueueType, TaskCell};
 use crate::task::{callback, future};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -288,6 +288,19 @@ impl Builder {
         let queue_builder = multilevel::Builder::new(multilevel::Config::default());
         let runner_builder = queue_builder.runner_builder(fb);
         self.build_with_queue_and_runner(QueueType::Multilevel(queue_builder), runner_builder)
+    }
+
+    /// Spawn a priority future pool.
+    ///
+    /// It setups the pool with priority queue. Caller must provide a `TaskPriorityProvider` implementation to generate the proper priority value for each spawned task.
+    pub fn build_priority_future_pool(
+        &self,
+        priority_provider: Arc<dyn priority::TaskPriorityProvider>,
+    ) -> ThreadPool<future::TaskCell> {
+        let fb = CloneRunnerBuilder(future::Runner::default());
+        let queue_builder = priority::Builder::new(priority::Config::default(), priority_provider);
+        let runner_builder = queue_builder.runner_builder(fb);
+        self.build_with_queue_and_runner(QueueType::Priority(queue_builder), runner_builder)
     }
 
     /// Spawns the thread pool immediately.

@@ -9,6 +9,7 @@
 //! data structs.
 
 pub mod multilevel;
+pub mod priority;
 
 mod extras;
 mod single_level;
@@ -18,7 +19,7 @@ pub use self::extras::Extras;
 use std::time::Instant;
 
 /// A cell containing a task and needed extra information.
-pub trait TaskCell {
+pub trait TaskCell: 'static {
     /// Gets mutable extra information.
     fn mut_extras(&mut self) -> &mut Extras;
 }
@@ -42,6 +43,7 @@ pub(crate) struct TaskInjector<T>(InjectorInner<T>);
 enum InjectorInner<T> {
     SingleLevel(single_level::TaskInjector<T>),
     Multilevel(multilevel::TaskInjector<T>),
+    Priority(priority::TaskInjector<T>),
 }
 
 impl<T: TaskCell + Send> TaskInjector<T> {
@@ -50,6 +52,7 @@ impl<T: TaskCell + Send> TaskInjector<T> {
         match &self.0 {
             InjectorInner::SingleLevel(q) => q.push(task_cell),
             InjectorInner::Multilevel(q) => q.push(task_cell),
+            InjectorInner::Priority(q) => q.push(task_cell),
         }
     }
 
@@ -57,6 +60,7 @@ impl<T: TaskCell + Send> TaskInjector<T> {
         match self.0 {
             InjectorInner::SingleLevel(_) => Extras::single_level(),
             InjectorInner::Multilevel(_) => Extras::multilevel_default(),
+            InjectorInner::Priority(_) => Extras::single_level(),
         }
     }
 }
@@ -80,6 +84,7 @@ pub(crate) struct LocalQueue<T>(LocalQueueInner<T>);
 enum LocalQueueInner<T> {
     SingleLevel(single_level::LocalQueue<T>),
     Multilevel(multilevel::LocalQueue<T>),
+    Priority(priority::LocalQueue<T>),
 }
 
 impl<T: TaskCell + Send> LocalQueue<T> {
@@ -88,6 +93,7 @@ impl<T: TaskCell + Send> LocalQueue<T> {
         match &mut self.0 {
             LocalQueueInner::SingleLevel(q) => q.push(task_cell),
             LocalQueueInner::Multilevel(q) => q.push(task_cell),
+            LocalQueueInner::Priority(q) => q.push(task_cell),
         }
     }
 
@@ -97,6 +103,7 @@ impl<T: TaskCell + Send> LocalQueue<T> {
         match &mut self.0 {
             LocalQueueInner::SingleLevel(q) => q.pop(),
             LocalQueueInner::Multilevel(q) => q.pop(),
+            LocalQueueInner::Priority(q) => q.pop(),
         }
     }
 
@@ -104,6 +111,7 @@ impl<T: TaskCell + Send> LocalQueue<T> {
         match self.0 {
             LocalQueueInner::SingleLevel(_) => Extras::single_level(),
             LocalQueueInner::Multilevel(_) => Extras::multilevel_default(),
+            LocalQueueInner::Priority(_) => Extras::single_level(),
         }
     }
 
@@ -113,6 +121,7 @@ impl<T: TaskCell + Send> LocalQueue<T> {
         match &mut self.0 {
             LocalQueueInner::SingleLevel(q) => q.has_tasks_or_pull(),
             LocalQueueInner::Multilevel(q) => q.has_tasks_or_pull(),
+            LocalQueueInner::Priority(q) => q.has_tasks_or_pull(),
         }
     }
 }
@@ -125,6 +134,8 @@ pub enum QueueType {
     ///
     /// More to see: https://en.wikipedia.org/wiki/Multilevel_feedback_queue.
     Multilevel(multilevel::Builder),
+    /// A concurrent prioirty queue.
+    Priority(priority::Builder),
 }
 
 impl Default for QueueType {
@@ -139,10 +150,17 @@ impl From<multilevel::Builder> for QueueType {
     }
 }
 
+impl From<priority::Builder> for QueueType {
+    fn from(b: priority::Builder) -> QueueType {
+        QueueType::Priority(b)
+    }
+}
+
 pub(crate) fn build<T>(ty: QueueType, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
     match ty {
         QueueType::SingleLevel => single_level(local_num),
         QueueType::Multilevel(b) => b.build(local_num),
+        QueueType::Priority(b) => b.build(local_num),
     }
 }
 

@@ -7,7 +7,7 @@
 
 mod builder;
 mod runner;
-mod spawn;
+pub(crate) mod spawn;
 mod worker;
 
 pub use self::builder::{Builder, SchedConfig};
