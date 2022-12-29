@@ -28,7 +28,7 @@ crossbeam-deque = {git = "https://github.com/crossbeam-rs/crossbeam", rev="41ed3
 failpoints = ["fail/failpoints"]
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.4"
 tokio = { version = "1.0", features = ["sync", "rt-multi-thread"] }
 async-std = "1.0"
 threadpool = "1.0"
