@@ -29,7 +29,8 @@ pub const LEVEL_NUM: usize = 3;
 /// The chance ratio of level 1 and level 2 tasks.
 const CHANCE_RATIO: u32 = 4;
 
-const DEFAULT_CLEANUP_OLD_MAP_INTERVAL: Duration = Duration::from_secs(10);
+/// The default interval for cleaning up task elapsed map.
+pub(super) const DEFAULT_CLEANUP_OLD_MAP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// When local total elapsed time exceeds this value in microseconds, the local
 /// metrics is flushed to the global atomic metrics and try to trigger chance
@@ -421,9 +422,12 @@ pub(super) struct TaskLevelManager {
 }
 
 impl TaskLevelManager {
-    pub fn new(level_time_threshold: [Duration; LEVEL_NUM - 1]) -> Self {
+    pub fn new(
+        level_time_threshold: [Duration; LEVEL_NUM - 1],
+        cleanup_interval: Option<Duration>,
+    ) -> Self {
         Self {
-            task_elapsed_map: TaskElapsedMap::default(),
+            task_elapsed_map: TaskElapsedMap::new(cleanup_interval),
             level_time_threshold,
         }
     }
@@ -439,7 +443,7 @@ impl TaskLevelManager {
             None => {
                 let running_time = extras
                     .total_running_time
-                    .get_or_insert_with(|| self.task_elapsed_map.get_elapsed(task_id));
+                    .get_or_insert_with(|| self.get_elapsed(task_id));
                 let running_time = running_time.as_duration();
                 self.level_time_threshold
                     .iter()
@@ -450,6 +454,14 @@ impl TaskLevelManager {
             }
         };
         extras.current_level = current_level;
+    }
+
+    pub(super) fn try_cleanup_task_elapsed_map(&self) -> Option<Instant> {
+        self.task_elapsed_map.try_cleanup()
+    }
+
+    pub(super) fn get_elapsed(&self, key: u64) -> Arc<ElapsedTime> {
+        self.task_elapsed_map.get_elapsed(key)
     }
 }
 
@@ -489,19 +501,19 @@ thread_local!(static TLS_LAST_CLEANUP_TIME: Cell<Instant> = Cell::new(Instant::n
 struct TaskElapsedMap {
     new_index: AtomicUsize,
     maps: [DashMap<u64, Arc<ElapsedTime>>; 2],
-    cleanup_interval: Duration,
+    cleanup_interval: Option<Duration>,
     last_cleanup_time: Mutex<Instant>,
     cleaning_up: AtomicBool,
 }
 
 impl Default for TaskElapsedMap {
     fn default() -> TaskElapsedMap {
-        TaskElapsedMap::new(DEFAULT_CLEANUP_OLD_MAP_INTERVAL)
+        TaskElapsedMap::new(Some(DEFAULT_CLEANUP_OLD_MAP_INTERVAL))
     }
 }
 
 impl TaskElapsedMap {
-    fn new(cleanup_interval: Duration) -> TaskElapsedMap {
+    fn new(cleanup_interval: Option<Duration>) -> TaskElapsedMap {
         TaskElapsedMap {
             new_index: AtomicUsize::new(0),
             maps: Default::default(),
@@ -533,43 +545,48 @@ impl TaskElapsedMap {
                 v.clone()
             }
         };
-        TLS_LAST_CLEANUP_TIME.with(|t| {
-            fail_point!("cleanup-in-get-elapsed", |_| ());
-            if recent().saturating_duration_since(t.get()) > self.cleanup_interval {
-                self.maybe_cleanup();
-            }
-        });
+        self.maybe_cleanup();
         elapsed
     }
 
+    fn try_cleanup(&self) -> Option<Instant> {
+        self.cleaning_up
+            .compare_exchange(false, true, SeqCst, SeqCst)
+            .map(|_| {
+                let old_index = self.new_index.load(SeqCst) ^ 1;
+                self.maps[old_index].clear();
+                self.new_index.store(old_index, SeqCst);
+                let now = now();
+                *self.last_cleanup_time.lock().unwrap() = now;
+                self.cleaning_up.store(false, SeqCst);
+                now
+            })
+            .ok()
+    }
+
     fn maybe_cleanup(&self) {
-        let last_cleanup_time = *self.last_cleanup_time.lock().unwrap();
-        let do_cleanup = recent().saturating_duration_since(last_cleanup_time)
-            > self.cleanup_interval
-            && self
-                .cleaning_up
-                .compare_exchange(false, true, SeqCst, SeqCst)
-                .is_ok();
-        let last_cleanup_time = if do_cleanup {
-            let old_index = self.new_index.load(SeqCst) ^ 1;
-            self.maps[old_index].clear();
-            self.new_index.store(old_index, SeqCst);
-            let now = now();
-            *self.last_cleanup_time.lock().unwrap() = now;
-            self.cleaning_up.store(false, SeqCst);
-            now
-        } else {
-            last_cleanup_time
-        };
-        TLS_LAST_CLEANUP_TIME.with(|t| {
-            t.set(last_cleanup_time);
-        });
+        if let Some(cleanup_interval) = self.cleanup_interval {
+            let min_cleanup_time = recent() - cleanup_interval;
+            TLS_LAST_CLEANUP_TIME.with(|t| {
+                let tls_last_cleanup_time = t.get();
+                if tls_last_cleanup_time < min_cleanup_time {
+                    let mut last_cleanup_time = *self.last_cleanup_time.lock().unwrap();
+                    if last_cleanup_time < min_cleanup_time {
+                        last_cleanup_time = self.try_cleanup().unwrap_or(last_cleanup_time)
+                    }
+                    if tls_last_cleanup_time < last_cleanup_time {
+                        t.set(last_cleanup_time);
+                    }
+                }
+            });
+        }
     }
 }
 
 /// The configurations of multilevel task queues.
 pub struct Config {
     name: Option<String>,
+    cleanup_interval: Option<Duration>,
     level_time_threshold: [Duration; LEVEL_NUM - 1],
     level0_proportion_target: f64,
 }
@@ -601,12 +618,26 @@ impl Config {
         self.level0_proportion_target = value;
         self
     }
+
+    /// Sets the interval of cleaning up task elapsed map.
+    ///
+    /// The pool tries to cleanup task elapsed map for every given interval. However, it may introduce tail latency on
+    /// spawning. You can set it to none to disable the auto cleanup, in which case, you also have to do the cleanup
+    /// task yourself.
+    ///
+    /// The default value is 10s.
+    #[inline]
+    pub fn cleanup_interval(mut self, value: Option<Duration>) -> Self {
+        self.cleanup_interval = value;
+        self
+    }
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config {
             name: None,
+            cleanup_interval: Some(DEFAULT_CLEANUP_OLD_MAP_INTERVAL),
             level_time_threshold: [Duration::from_millis(5), Duration::from_millis(100)],
             level0_proportion_target: 0.8,
         }
@@ -671,7 +702,10 @@ impl Builder {
         let manager = Arc::new(LevelManager {
             level0_elapsed_us,
             total_elapsed_us,
-            task_level_mgr: TaskLevelManager::new(config.level_time_threshold),
+            task_level_mgr: TaskLevelManager::new(
+                config.level_time_threshold,
+                config.cleanup_interval,
+            ),
             level0_chance,
             level0_proportion_target: config.level0_proportion_target,
             adjusting: AtomicBool::new(false),
@@ -695,6 +729,12 @@ impl Builder {
             inner: inner_runner_builder,
             manager: self.manager.clone(),
         }
+    }
+
+    /// Returns a function for cleaning up task elapsed map.
+    pub fn cleanup_fn(&self) -> impl Fn() -> Option<Instant> {
+        let m = self.manager.clone();
+        move || m.task_level_mgr.try_cleanup_task_elapsed_map()
     }
 
     fn build_raw<T>(self, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
@@ -794,28 +834,39 @@ mod tests {
 
     #[test]
     fn test_task_elapsed_map_cleanup() {
-        let map = TaskElapsedMap::new(Duration::from_millis(200));
-        map.get_elapsed(1).inc_by(Duration::from_secs(1));
+        // Create a map with cleanup interval
+        let map1 = TaskElapsedMap::new(Some(Duration::from_millis(200)));
+        map1.get_elapsed(1).inc_by(Duration::from_secs(1));
+        // Create a map without cleanup interval
+        let map2 = TaskElapsedMap::new(None);
+        map2.get_elapsed(1).inc_by(Duration::from_secs(1));
 
         // Trigger a cleanup
         thread::sleep(Duration::from_millis(200));
         now(); // Update recent now
-        map.get_elapsed(2).inc_by(Duration::from_secs(1));
+        map1.get_elapsed(2).inc_by(Duration::from_secs(1));
+        map2.get_elapsed(2).inc_by(Duration::from_secs(1));
         // After one cleanup, we can still read the old stats
-        assert_eq!(map.get_elapsed(1).as_duration(), Duration::from_secs(1));
+        assert_eq!(map1.get_elapsed(1).as_duration(), Duration::from_secs(1));
+        assert_eq!(map2.get_elapsed(1).as_duration(), Duration::from_secs(1));
 
         // Trigger a cleanup
         thread::sleep(Duration::from_millis(200));
         now();
-        map.get_elapsed(2).inc_by(Duration::from_secs(1));
+        map1.get_elapsed(2).inc_by(Duration::from_secs(1));
+        map2.get_elapsed(2).inc_by(Duration::from_secs(1));
         // Trigger another cleanup
         thread::sleep(Duration::from_millis(200));
         now();
-        map.get_elapsed(2).inc_by(Duration::from_secs(1));
-        assert_eq!(map.get_elapsed(2).as_duration(), Duration::from_secs(3));
+        map1.get_elapsed(2).inc_by(Duration::from_secs(1));
+        map2.get_elapsed(2).inc_by(Duration::from_secs(1));
+        assert_eq!(map1.get_elapsed(2).as_duration(), Duration::from_secs(3));
+        assert_eq!(map2.get_elapsed(2).as_duration(), Duration::from_secs(3));
 
-        // After two cleanups, we won't be able to read the old stats with id = 1
-        assert_eq!(map.get_elapsed(1).as_duration(), Duration::from_secs(0));
+        // After two cleanups, we won't be able to read the old stats with id = 1 from map1
+        assert_eq!(map1.get_elapsed(1).as_duration(), Duration::from_secs(0));
+        // After two cleanups, we are still able to read the old stats with id = 1 from map2
+        assert_eq!(map2.get_elapsed(1).as_duration(), Duration::from_secs(1));
     }
 
     #[derive(Debug)]
@@ -1066,7 +1117,7 @@ mod tests {
         let _guard = fail::FailScenario::setup();
         fail::cfg("between-get-from-old-and-insert-into-new", "delay(500)").unwrap();
         fail::cfg("before-insert-new", "delay(400)").unwrap();
-        let map = Arc::new(TaskElapsedMap::new(Duration::default()));
+        let map = Arc::new(TaskElapsedMap::new(Some(Duration::default())));
 
         let map2 = map.clone();
         thread::spawn(move || {
@@ -1111,5 +1162,21 @@ mod tests {
             tx.send(()).unwrap();
         });
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn test_cleanup_fn() {
+        let builder = Builder::new(Config::default().cleanup_interval(None));
+        let cleanup = builder.cleanup_fn();
+        let mgr = &builder.manager.task_level_mgr;
+        mgr.get_elapsed(1).inc_by(Duration::from_secs(1));
+        assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(1));
+        cleanup();
+        assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(1));
+        cleanup();
+        assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(1));
+        cleanup();
+        cleanup();
+        assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(0));
     }
 }

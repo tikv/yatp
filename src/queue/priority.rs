@@ -24,7 +24,9 @@ use prometheus::IntCounter;
 use crate::metrics::*;
 use crate::pool::{Local, Runner, RunnerBuilder};
 use crate::queue::{
-    multilevel::{TaskLevelManager, FLUSH_LOCAL_THRESHOLD_US, LEVEL_NUM},
+    multilevel::{
+        TaskLevelManager, DEFAULT_CLEANUP_OLD_MAP_INTERVAL, FLUSH_LOCAL_THRESHOLD_US, LEVEL_NUM,
+    },
     Extras, Pop, TaskCell,
 };
 
@@ -252,6 +254,7 @@ where
 /// The configurations of priority task queues.
 pub struct Config {
     name: Option<String>,
+    cleanup_interval: Option<Duration>,
     level_time_threshold: [Duration; LEVEL_NUM - 1],
 }
 
@@ -261,12 +264,26 @@ impl Config {
         self.name = name.map(Into::into);
         self
     }
+
+    /// Sets the interval of cleaning up task elapsed map.
+    ///
+    /// The pool tries to cleanup task elapsed map for every given interval. However, it may introduce tail latency on
+    /// spawning. You can set it to none to disable the auto cleanup, in which case, you also have to do the cleanup
+    /// task yourself.
+    ///
+    /// The default value is 10s.
+    #[inline]
+    pub fn cleanup_interval(mut self, value: Option<Duration>) -> Self {
+        self.cleanup_interval = value;
+        self
+    }
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config {
             name: None,
+            cleanup_interval: Some(DEFAULT_CLEANUP_OLD_MAP_INTERVAL),
             level_time_threshold: [Duration::from_millis(5), Duration::from_millis(100)],
         }
     }
@@ -284,6 +301,7 @@ impl Builder {
     pub fn new(config: Config, priority_manager: Arc<dyn TaskPriorityProvider>) -> Builder {
         let Config {
             name,
+            cleanup_interval,
             level_time_threshold,
         } = config;
         let (level0_elapsed_us, total_elapsed_us) = if let Some(name) = name {
@@ -303,7 +321,10 @@ impl Builder {
         };
         Self {
             manager: PriorityTaskManager {
-                level_manager: Arc::new(TaskLevelManager::new(level_time_threshold)),
+                level_manager: Arc::new(TaskLevelManager::new(
+                    level_time_threshold,
+                    cleanup_interval,
+                )),
                 priority_manager,
             },
             level0_elapsed_us,
@@ -318,6 +339,12 @@ impl Builder {
             level0_elapsed_us: self.level0_elapsed_us.clone(),
             total_elapsed_us: self.total_elapsed_us.clone(),
         }
+    }
+
+    /// Returns a function for trying to cleanup task elapsed map.
+    pub fn cleanup_fn(&self) -> impl Fn() -> Option<Instant> {
+        let m = self.manager.level_manager.clone();
+        move || m.try_cleanup_task_elapsed_map()
     }
 
     pub(crate) fn build_raw<T>(self, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
@@ -401,16 +428,16 @@ mod tests {
         }
     }
 
+    struct OrderByIdProvider;
+
+    impl TaskPriorityProvider for OrderByIdProvider {
+        fn priority_of(&self, extras: &Extras) -> u64 {
+            return extras.task_id();
+        }
+    }
+
     #[test]
     fn test_priority_queue() {
-        struct OrderByIdProvider;
-
-        impl TaskPriorityProvider for OrderByIdProvider {
-            fn priority_of(&self, extras: &Extras) -> u64 {
-                return extras.task_id();
-            }
-        }
-
         let local_count = 5usize;
         let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
         let mut runner = builder.runner_builder(MockRunnerBuilder).build();
@@ -478,5 +505,24 @@ mod tests {
         run_task(95, 1);
         // after 100ms, the task should be put to level2
         run_task(1, 2);
+    }
+
+    #[test]
+    fn test_cleanup_fn() {
+        let builder = Builder::new(
+            Config::default().cleanup_interval(None),
+            Arc::new(OrderByIdProvider),
+        );
+        let cleanup = builder.cleanup_fn();
+        let mgr = builder.manager.level_manager.clone();
+        mgr.get_elapsed(1).inc_by(Duration::from_secs(1));
+        assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(1));
+        cleanup();
+        assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(1));
+        cleanup();
+        assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(1));
+        cleanup();
+        cleanup();
+        assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(0));
     }
 }
