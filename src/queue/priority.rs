@@ -41,13 +41,6 @@ pub struct TaskInjector<T> {
     task_manager: PriorityTaskManager,
 }
 
-fn set_schedule_time<T>(task_cell: &mut T)
-where
-    T: TaskCell,
-{
-    task_cell.mut_extras().schedule_time = Some(Instant::now());
-}
-
 impl<T> TaskInjector<T>
 where
     T: TaskCell + Send,
@@ -56,7 +49,6 @@ where
     /// assigned to be now.
     pub fn push(&self, mut task_cell: T) {
         let priority = self.task_manager.prepare_before_push(&mut task_cell);
-        set_schedule_time(&mut task_cell);
         self.queue.push(task_cell, priority);
     }
 }
@@ -96,6 +88,7 @@ impl PriorityTaskManager {
         T: TaskCell,
     {
         self.level_manager.adjust_task_level(task_cell);
+        task_cell.mut_extras().schedule_time = Some(self.level_manager.now());
         self.priority_manager.priority_of(task_cell.mut_extras())
     }
 }
@@ -384,7 +377,10 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::queue::{Extras, InjectorInner};
+    use crate::queue::{
+        multilevel::{now, recent},
+        Extras, InjectorInner,
+    };
     use rand::RngCore;
     #[derive(Debug)]
     struct MockTask {
@@ -505,6 +501,17 @@ mod tests {
         run_task(95, 1);
         // after 100ms, the task should be put to level2
         run_task(1, 2);
+    }
+
+    #[test]
+    fn test_push_task_update_tls_recent() {
+        // auto cleanup will be triggered only when tls_recent_now - tls_last_cleanup_time > cleanup_interval, thus we'd
+        // better make sure that tls_recent always gets updated after pushing task.
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build::<MockTask>(1);
+        let time_before_push = now();
+        injector.push(MockTask::new(0, 0));
+        assert!(recent() > time_before_push);
     }
 
     #[test]

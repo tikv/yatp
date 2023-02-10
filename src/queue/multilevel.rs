@@ -349,7 +349,7 @@ impl LevelManager {
         T: TaskCell,
     {
         self.task_level_mgr.adjust_task_level(task_cell);
-        task_cell.mut_extras().schedule_time = Some(now());
+        task_cell.mut_extras().schedule_time = Some(self.task_level_mgr.now());
     }
 
     fn maybe_adjust_chance(&self) {
@@ -454,6 +454,15 @@ impl TaskLevelManager {
             }
         };
         extras.current_level = current_level;
+    }
+
+    pub(super) fn now(&self) -> Instant {
+        if self.task_elapsed_map.cleanup_interval.is_some() {
+            now()
+        } else {
+            // we do not need to update tls_recent_now if auto cleanup is disabled.
+            Instant::now()
+        }
     }
 
     pub(super) fn try_cleanup_task_elapsed_map(&self) -> Option<Instant> {
@@ -795,7 +804,7 @@ thread_local!(static RECENT_NOW: Cell<Instant> = Cell::new(Instant::now()));
 
 /// Returns an instant corresponding to now and updates the thread-local recent
 /// now.
-fn now() -> Instant {
+pub(super) fn now() -> Instant {
     let res = Instant::now();
     RECENT_NOW.with(|r| r.set(res));
     res
@@ -805,7 +814,7 @@ fn now() -> Instant {
 /// `Instant::now` frequently.
 ///
 /// You should only use it when the thread-local recent now is recently updated.
-fn recent() -> Instant {
+pub(super) fn recent() -> Instant {
     RECENT_NOW.with(|r| r.get())
 }
 
@@ -992,6 +1001,17 @@ mod tests {
                 .sleep_ms,
             4
         );
+    }
+
+    #[test]
+    fn test_push_task_update_tls_recent() {
+        // auto cleanup will be triggered only when tls_recent_now - tls_last_cleanup_time > cleanup_interval, thus we'd
+        // better make sure that tls_recent always gets updated after pushing task.
+        let builder = Builder::new(Config::default());
+        let (injector, _) = builder.build::<MockTask>(1);
+        let time_before_push = now();
+        injector.push(MockTask::new(0, Extras::multilevel_default()));
+        assert!(recent() > time_before_push);
     }
 
     #[test]
