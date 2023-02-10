@@ -465,7 +465,7 @@ impl TaskLevelManager {
         }
     }
 
-    pub(super) fn try_cleanup_task_elapsed_map(&self) -> Option<Instant> {
+    pub(super) fn try_cleanup(&self) -> Option<Instant> {
         self.task_elapsed_map.try_cleanup()
     }
 
@@ -743,7 +743,7 @@ impl Builder {
     /// Returns a function for cleaning up task elapsed map.
     pub fn cleanup_fn(&self) -> impl Fn() -> Option<Instant> {
         let m = self.manager.clone();
-        move || m.task_level_mgr.try_cleanup_task_elapsed_map()
+        move || m.task_level_mgr.try_cleanup()
     }
 
     fn build_raw<T>(self, local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
