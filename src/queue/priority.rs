@@ -25,7 +25,8 @@ use crate::metrics::*;
 use crate::pool::{Local, Runner, RunnerBuilder};
 use crate::queue::{
     multilevel::{
-        TaskLevelManager, DEFAULT_CLEANUP_OLD_MAP_INTERVAL, FLUSH_LOCAL_THRESHOLD_US, LEVEL_NUM,
+        now, TaskLevelManager, DEFAULT_CLEANUP_OLD_MAP_INTERVAL, FLUSH_LOCAL_THRESHOLD_US,
+        LEVEL_NUM,
     },
     Extras, Pop, TaskCell,
 };
@@ -88,7 +89,7 @@ impl PriorityTaskManager {
         T: TaskCell,
     {
         self.level_manager.adjust_task_level(task_cell);
-        task_cell.mut_extras().schedule_time = Some(self.level_manager.now());
+        task_cell.mut_extras().schedule_time = Some(now());
         self.priority_manager.priority_of(task_cell.mut_extras())
     }
 }

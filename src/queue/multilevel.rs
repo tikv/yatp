@@ -11,7 +11,7 @@ use crate::metrics::*;
 use crate::pool::{Local, Runner, RunnerBuilder};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
-use dashmap::DashMap;
+use dashmap::{try_result::TryResult::Present, DashMap};
 use fail::fail_point;
 use prometheus::local::{LocalHistogram, LocalIntCounter};
 use prometheus::{Gauge, Histogram, HistogramOpts, IntCounter};
@@ -349,7 +349,7 @@ impl LevelManager {
         T: TaskCell,
     {
         self.task_level_mgr.adjust_task_level(task_cell);
-        task_cell.mut_extras().schedule_time = Some(self.task_level_mgr.now());
+        task_cell.mut_extras().schedule_time = Some(now());
     }
 
     fn maybe_adjust_chance(&self) {
@@ -456,15 +456,6 @@ impl TaskLevelManager {
         extras.current_level = current_level;
     }
 
-    pub(super) fn now(&self) -> Instant {
-        if self.task_elapsed_map.cleanup_interval.is_some() {
-            now()
-        } else {
-            // we do not need to update tls_recent_now if auto cleanup is disabled.
-            Instant::now()
-        }
-    }
-
     pub(super) fn try_cleanup(&self) -> Option<Instant> {
         self.task_elapsed_map.try_cleanup()
     }
@@ -540,15 +531,16 @@ impl TaskElapsedMap {
             return v.clone();
         }
         fail_point!("between-read-new-and-read-old");
-        let elapsed = match old_map.get(&key) {
-            Some(v) => {
+        let elapsed = match old_map.try_get(&key) {
+            Present(v) => {
                 let v2 = v.clone();
                 drop(v);
                 fail_point!("between-get-from-old-and-insert-into-new");
                 new_map.insert(key, v2.clone());
                 v2
             }
-            None => {
+            _ => {
+                // the key is absent or the old map is under clearing
                 fail_point!("before-insert-new");
                 let v = new_map.entry(key).or_default();
                 v.clone()
