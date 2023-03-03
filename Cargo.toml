@@ -20,10 +20,6 @@ parking_lot_core = "0.9"
 prometheus = { version = "0.13", default-features = false }
 rand = "0.8"
 
-# TODO: remove this patch after the next version is released.
-[patch.crates-io]
-crossbeam-deque = {git = "https://github.com/crossbeam-rs/crossbeam", rev="41ed3d948720f26149b2ebeaf58fe8a193134056"}
-
 [features]
 failpoints = ["fail/failpoints"]
 
