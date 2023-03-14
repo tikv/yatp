@@ -71,7 +71,7 @@ where
 }
 
 /// priority key
-#[derive(PartialEq, PartialOrd, Eq, Ord, Default)]
+#[derive(PartialEq, Copy, PartialOrd, Eq, Ord, Default)]
 pub struct Priority {
     ///
     pub priority: u64,
