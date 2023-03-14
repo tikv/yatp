@@ -73,8 +73,10 @@ where
 /// priority key
 #[derive(PartialEq, PartialOrd, Eq, Ord)]
 pub struct Priority {
-    priority: u64,
-    vt: u64,
+    ///
+    pub priority: u64,
+    ///
+    pub vt: u64,
 }
 
 /// A trait used to generate priority value for each task.
