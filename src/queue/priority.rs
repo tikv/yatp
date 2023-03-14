@@ -30,7 +30,7 @@ use crate::queue::{
 
 // a wrapper of u64 with an extra sequence number to avoid duplicate value.
 #[derive(Eq, PartialEq, Ord, PartialOrd)]
-struct MapKey(u64, u64);
+struct MapKey(Priority, u64);
 
 /// The injector of a single level work stealing task queue.
 #[derive(Clone)]
@@ -75,11 +75,18 @@ where
     }
 }
 
+/// priority key
+#[derive(PartialEq, PartialOrd, Eq, Ord)]
+pub struct Priority {
+    priority: u64,
+    vt: u64,
+}
+
 /// A trait used to generate priority value for each task.
 pub trait TaskPriorityProvider: Send + Sync + 'static {
     /// Return a priority value of this task, all tasks in the priority
     /// queue is ordered by this value.
-    fn priority_of(&self, extras: &Extras) -> u64;
+    fn priority_of(&self, extras: &Extras) -> Priority;
 }
 
 #[derive(Clone)]
@@ -89,7 +96,7 @@ struct PriorityTaskManager {
 }
 
 impl PriorityTaskManager {
-    fn prepare_before_push<T>(&self, task_cell: &mut T) -> u64
+    fn prepare_before_push<T>(&self, task_cell: &mut T) -> Priority
     where
         T: TaskCell,
     {
@@ -120,7 +127,7 @@ impl<T> QueueCore<T> {
 }
 
 impl<T: TaskCell + Send + 'static> QueueCore<T> {
-    fn push(&self, msg: T, priority: u64) {
+    fn push(&self, msg: T, priority: Priority) {
         self.pq.insert(self.gen_key(priority), Slot::new(msg));
     }
 
@@ -143,7 +150,7 @@ impl<T: TaskCell + Send + 'static> QueueCore<T> {
     }
 
     #[inline]
-    fn gen_key(&self, priority: u64) -> MapKey {
+    fn gen_key(&self, priority: Priority) -> MapKey {
         MapKey(priority, self.sequence.fetch_add(1, Ordering::Relaxed))
     }
 }
