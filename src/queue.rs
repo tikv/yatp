@@ -60,7 +60,7 @@ impl<T: TaskCell + Send> TaskInjector<T> {
         match self.0 {
             InjectorInner::SingleLevel(_) => Extras::single_level(),
             InjectorInner::Multilevel(_) => Extras::multilevel_default(),
-            InjectorInner::Priority(_) => Extras::single_level(),
+            InjectorInner::Priority(_) => Extras::multilevel_default(),
         }
     }
 }
