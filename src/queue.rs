@@ -58,9 +58,8 @@ impl<T: TaskCell + Send> TaskInjector<T> {
 
     pub fn default_extras(&self) -> Extras {
         match self.0 {
-            InjectorInner::SingleLevel(_) => Extras::single_level(),
+            InjectorInner::SingleLevel(_) | InjectorInner::Priority(_) => Extras::single_level(),
             InjectorInner::Multilevel(_) => Extras::multilevel_default(),
-            InjectorInner::Priority(_) => Extras::multilevel_default(),
         }
     }
 }

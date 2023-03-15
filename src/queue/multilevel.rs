@@ -240,6 +240,21 @@ pub struct TrackedRunner<R> {
     task_execute_duration: LocalHistogram,
     task_poll_duration: [LocalHistogram; LEVEL_NUM],
     task_execute_times: LocalHistogram,
+    // whether to trigger local metrics flush.
+    auto_flush_metrics: bool,
+}
+
+impl<R> TrackedRunner<R> {
+    pub(super) fn flush(&mut self) {
+        self.local_level0_elapsed_us.flush();
+        self.local_total_elapsed_us.flush();
+        self.task_execute_duration.flush();
+        self.task_wait_duration.flush();
+        self.task_execute_times.flush();
+        for h in &self.task_poll_duration {
+            h.flush();
+        }
+    }
 }
 
 impl<R, T> Runner for TrackedRunner<R>
@@ -284,15 +299,8 @@ where
         }
         self.local_total_elapsed_us.inc_by(elapsed_us);
         let local_total = self.local_total_elapsed_us.get();
-        if local_total > FLUSH_LOCAL_THRESHOLD_US {
-            self.local_level0_elapsed_us.flush();
-            self.local_total_elapsed_us.flush();
-            self.task_execute_duration.flush();
-            self.task_wait_duration.flush();
-            self.task_execute_times.flush();
-            for h in &self.task_poll_duration {
-                h.flush();
-            }
+        if self.auto_flush_metrics && local_total > FLUSH_LOCAL_THRESHOLD_US {
+            self.flush();
         }
         res
     }
@@ -377,11 +385,16 @@ impl MultiLevelMetrics {
 pub struct TrackedRunnerBuilder<B> {
     inner: B,
     metrics: MultiLevelMetrics,
+    auto_flush_metrics: bool,
 }
 
 impl<B> TrackedRunnerBuilder<B> {
-    pub(super) fn new(inner: B, metrics: MultiLevelMetrics) -> Self {
-        Self { inner, metrics }
+    pub(super) fn new(inner: B, metrics: MultiLevelMetrics, auto_flush_metrics: bool) -> Self {
+        Self {
+            inner,
+            metrics,
+            auto_flush_metrics,
+        }
     }
 }
 
@@ -402,6 +415,7 @@ where
             task_wait_duration: self.metrics.task_wait_duration.local(),
             task_poll_duration: array::from_fn(|i| self.metrics.task_poll_duration[i].local()),
             task_execute_times: self.metrics.task_execute_times.local(),
+            auto_flush_metrics: self.auto_flush_metrics,
         }
     }
 }
@@ -429,6 +443,7 @@ where
         let res = self.inner.handle(local, task_cell);
         let local_total = self.inner.local_total_elapsed_us.get();
         if local_total > FLUSH_LOCAL_THRESHOLD_US {
+            self.inner.flush();
             self.manager.maybe_adjust_chance();
         }
         res
@@ -814,6 +829,7 @@ impl Builder {
             inner: TrackedRunnerBuilder {
                 inner: inner_runner_builder,
                 metrics: self.metrics.clone(),
+                auto_flush_metrics: false,
             },
             manager: self.manager.clone(),
         }

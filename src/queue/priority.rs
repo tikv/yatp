@@ -225,7 +225,7 @@ impl Builder {
 
     /// Creates a runner builder for the multilevel task queue with a normal runner builder.
     pub fn runner_builder<B>(&self, inner_runner_builder: B) -> TrackedRunnerBuilder<B> {
-        TrackedRunnerBuilder::new(inner_runner_builder, self.metrics.clone())
+        TrackedRunnerBuilder::new(inner_runner_builder, self.metrics.clone(), true)
     }
 
     /// Returns a function for trying to cleanup task elapsed map.
