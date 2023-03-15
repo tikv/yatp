@@ -211,7 +211,7 @@ where
 ///
 /// It can be created by [`Builder::runner_builder`].
 pub struct MultilevelRunnerBuilder<B> {
-    inner: B,
+    inner: TrackedRunnerBuilder<B>,
     manager: Arc<LevelManager>,
 }
 
@@ -227,23 +227,13 @@ where
         MultilevelRunner {
             inner: self.inner.build(),
             manager: self.manager.clone(),
-            local_level0_elapsed_us: self.manager.level0_elapsed_us.local(),
-            local_total_elapsed_us: self.manager.total_elapsed_us.local(),
-            task_execute_duration: self.manager.task_execute_duration.local(),
-            task_wait_duration: self.manager.task_wait_duration.local(),
-            task_poll_duration: array::from_fn(|i| self.manager.task_poll_duration[i].local()),
-            task_execute_times: self.manager.task_execute_times.local(),
         }
     }
 }
 
-/// The runner for multilevel task queues.
-///
-/// The runner helps multilevel task queues collect additional information.
-/// [`MultilevelRunnerBuilder`] is the [`RunnerBuilder`] for this runner.
-pub struct MultilevelRunner<R> {
+/// `TrackedRunner` wraps a runner with some metrics.
+pub struct TrackedRunner<R> {
     inner: R,
-    manager: Arc<LevelManager>,
     local_level0_elapsed_us: LocalIntCounter,
     local_total_elapsed_us: LocalIntCounter,
     task_wait_duration: LocalHistogram,
@@ -252,7 +242,7 @@ pub struct MultilevelRunner<R> {
     task_execute_times: LocalHistogram,
 }
 
-impl<R, T> Runner for MultilevelRunner<R>
+impl<R, T> Runner for TrackedRunner<R>
 where
     R: Runner<TaskCell = T>,
     T: TaskCell,
@@ -303,6 +293,142 @@ where
             for h in &self.task_poll_duration {
                 h.flush();
             }
+        }
+        res
+    }
+
+    fn pause(&mut self, local: &mut Local<T>) -> bool {
+        self.inner.pause(local)
+    }
+
+    fn resume(&mut self, local: &mut Local<T>) {
+        self.inner.resume(local)
+    }
+
+    fn end(&mut self, local: &mut Local<T>) {
+        self.inner.end(local)
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct MultiLevelMetrics {
+    level0_elapsed_us: IntCounter,
+    total_elapsed_us: IntCounter,
+    task_wait_duration: Histogram,
+    task_execute_duration: Histogram,
+    task_poll_duration: [Histogram; LEVEL_NUM],
+    task_execute_times: Histogram,
+}
+
+impl MultiLevelMetrics {
+    pub fn new(name: Option<&str>) -> Self {
+        let (
+            level0_elapsed_us,
+            total_elapsed_us,
+            task_wait_duration,
+            task_execute_duration,
+            task_execute_times,
+            task_poll_duration,
+        ) = if let Some(name) = name {
+            (
+                MULTILEVEL_LEVEL_ELAPSED
+                    .get_metric_with_label_values(&[name, "0"])
+                    .unwrap(),
+                MULTILEVEL_LEVEL_ELAPSED
+                    .get_metric_with_label_values(&[name, "total"])
+                    .unwrap(),
+                TASK_WAIT_DURATION
+                    .get_metric_with_label_values(&[name])
+                    .unwrap(),
+                TASK_EXEC_DURATION
+                    .get_metric_with_label_values(&[name])
+                    .unwrap(),
+                TASK_EXEC_TIMES
+                    .get_metric_with_label_values(&[name])
+                    .unwrap(),
+                array::from_fn(|i| {
+                    TASK_POLL_DURATION
+                        .get_metric_with_label_values(&[name, &format!("{i}")])
+                        .unwrap()
+                }),
+            )
+        } else {
+            (
+                IntCounter::new("_", "_").unwrap(),
+                IntCounter::new("_", "_").unwrap(),
+                Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap(),
+                Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap(),
+                Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap(),
+                array::from_fn(|_| Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap()),
+            )
+        };
+        Self {
+            level0_elapsed_us,
+            total_elapsed_us,
+            task_wait_duration,
+            task_execute_duration,
+            task_execute_times,
+            task_poll_duration,
+        }
+    }
+}
+
+/// TrackedRunnerBuilder is the runner builder for TrackedRunner
+pub struct TrackedRunnerBuilder<B> {
+    inner: B,
+    metrics: MultiLevelMetrics,
+}
+
+impl<B> TrackedRunnerBuilder<B> {
+    pub(super) fn new(inner: B, metrics: MultiLevelMetrics) -> Self {
+        Self { inner, metrics }
+    }
+}
+
+impl<B, R, T> RunnerBuilder for TrackedRunnerBuilder<B>
+where
+    B: RunnerBuilder<Runner = R>,
+    R: Runner<TaskCell = T>,
+    T: TaskCell,
+{
+    type Runner = TrackedRunner<R>;
+
+    fn build(&mut self) -> Self::Runner {
+        TrackedRunner {
+            inner: self.inner.build(),
+            local_level0_elapsed_us: self.metrics.level0_elapsed_us.local(),
+            local_total_elapsed_us: self.metrics.total_elapsed_us.local(),
+            task_execute_duration: self.metrics.task_execute_duration.local(),
+            task_wait_duration: self.metrics.task_wait_duration.local(),
+            task_poll_duration: array::from_fn(|i| self.metrics.task_poll_duration[i].local()),
+            task_execute_times: self.metrics.task_execute_times.local(),
+        }
+    }
+}
+/// The runner for multilevel task queues.
+///
+/// The runner helps multilevel task queues collect additional information.
+/// [`MultilevelRunnerBuilder`] is the [`RunnerBuilder`] for this runner.
+pub struct MultilevelRunner<R> {
+    inner: TrackedRunner<R>,
+    manager: Arc<LevelManager>,
+}
+
+impl<R, T> Runner for MultilevelRunner<R>
+where
+    R: Runner<TaskCell = T>,
+    T: TaskCell,
+{
+    type TaskCell = T;
+
+    fn start(&mut self, local: &mut Local<T>) {
+        self.inner.start(local)
+    }
+
+    fn handle(&mut self, local: &mut Local<T>, task_cell: T) -> bool {
+        let res = self.inner.handle(local, task_cell);
+        let local_total = self.inner.local_total_elapsed_us.get();
+        if local_total > FLUSH_LOCAL_THRESHOLD_US {
             self.manager.maybe_adjust_chance();
         }
         res
@@ -330,10 +456,7 @@ struct LevelManager {
     adjusting: AtomicBool,
     last_level0_elapsed_us: Cell<u64>,
     last_total_elapsed_us: Cell<u64>,
-    task_wait_duration: Histogram,
-    task_execute_duration: Histogram,
     task_poll_duration: [Histogram; LEVEL_NUM],
-    task_execute_times: Histogram,
     last_exec_tasks_per_level: [Cell<u64>; LEVEL_NUM],
     max_level_queue_steal_size: AtomicUsize,
 }
@@ -647,62 +770,26 @@ impl Default for Config {
 
 /// The builder of a multilevel task queue.
 pub struct Builder {
+    metrics: MultiLevelMetrics,
     manager: Arc<LevelManager>,
 }
 
 impl Builder {
     /// Creates a multilevel task queue builder from the config.
     pub fn new(config: Config) -> Builder {
-        let (
-            level0_elapsed_us,
-            total_elapsed_us,
-            level0_chance,
-            task_wait_duration,
-            task_execute_duration,
-            task_execute_times,
-            task_poll_duration,
-        ) = if let Some(name) = config.name {
-            (
-                MULTILEVEL_LEVEL_ELAPSED
-                    .get_metric_with_label_values(&[&name, "0"])
-                    .unwrap(),
-                MULTILEVEL_LEVEL_ELAPSED
-                    .get_metric_with_label_values(&[&name, "total"])
-                    .unwrap(),
-                MULTILEVEL_LEVEL0_CHANCE
-                    .get_metric_with_label_values(&[&name])
-                    .unwrap(),
-                TASK_WAIT_DURATION
-                    .get_metric_with_label_values(&[&name])
-                    .unwrap(),
-                TASK_EXEC_DURATION
-                    .get_metric_with_label_values(&[&name])
-                    .unwrap(),
-                TASK_EXEC_TIMES
-                    .get_metric_with_label_values(&[&name])
-                    .unwrap(),
-                array::from_fn(|i| {
-                    TASK_POLL_DURATION
-                        .get_metric_with_label_values(&[&name, &format!("{i}")])
-                        .unwrap()
-                }),
-            )
+        let metrics = MultiLevelMetrics::new(config.name.as_deref());
+        let level0_chance = if let Some(name) = config.name {
+            MULTILEVEL_LEVEL0_CHANCE
+                .get_metric_with_label_values(&[&name])
+                .unwrap()
         } else {
-            (
-                IntCounter::new("_", "_").unwrap(),
-                IntCounter::new("_", "_").unwrap(),
-                Gauge::new("_", "_").unwrap(),
-                Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap(),
-                Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap(),
-                Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap(),
-                array::from_fn(|_| Histogram::with_opts(HistogramOpts::new("_", "_")).unwrap()),
-            )
+            Gauge::new("_", "_").unwrap()
         };
 
         level0_chance.set(INIT_LEVEL0_CHANCE);
         let manager = Arc::new(LevelManager {
-            level0_elapsed_us,
-            total_elapsed_us,
+            level0_elapsed_us: metrics.level0_elapsed_us.clone(),
+            total_elapsed_us: metrics.total_elapsed_us.clone(),
             task_level_mgr: TaskLevelManager::new(
                 config.level_time_threshold,
                 config.cleanup_interval,
@@ -712,22 +799,22 @@ impl Builder {
             adjusting: AtomicBool::new(false),
             last_level0_elapsed_us: Cell::new(0),
             last_total_elapsed_us: Cell::new(0),
-            task_wait_duration,
-            task_execute_duration,
-            task_poll_duration,
-            task_execute_times,
             last_exec_tasks_per_level: array::from_fn(|_| Cell::new(0)),
+            task_poll_duration: metrics.task_poll_duration.clone(),
             max_level_queue_steal_size: AtomicUsize::new(
                 DEFAULT_STEAL_LIMIT_PER_LEVEL[LEVEL_NUM - 1],
             ),
         });
-        Builder { manager }
+        Builder { manager, metrics }
     }
 
     /// Creates a runner builder for the multilevel task queue with a normal runner builder.
     pub fn runner_builder<B>(&self, inner_runner_builder: B) -> MultilevelRunnerBuilder<B> {
         MultilevelRunnerBuilder {
-            inner: inner_runner_builder,
+            inner: TrackedRunnerBuilder {
+                inner: inner_runner_builder,
+                metrics: self.metrics.clone(),
+            },
             manager: self.manager.clone(),
         }
     }
