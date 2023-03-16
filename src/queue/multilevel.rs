@@ -255,6 +255,11 @@ impl<R> TrackedRunner<R> {
             h.flush();
         }
     }
+
+    #[inline]
+    pub(super) fn should_flush(&self) -> bool {
+        self.local_total_elapsed_us.get() >= FLUSH_LOCAL_THRESHOLD_US
+    }
 }
 
 impl<R, T> Runner for TrackedRunner<R>
@@ -298,8 +303,7 @@ where
             self.task_execute_times.observe(exec_times as f64);
         }
         self.local_total_elapsed_us.inc_by(elapsed_us);
-        let local_total = self.local_total_elapsed_us.get();
-        if self.auto_flush_metrics && local_total > FLUSH_LOCAL_THRESHOLD_US {
+        if self.auto_flush_metrics && self.should_flush() {
             self.flush();
         }
         res
@@ -441,8 +445,7 @@ where
 
     fn handle(&mut self, local: &mut Local<T>, task_cell: T) -> bool {
         let res = self.inner.handle(local, task_cell);
-        let local_total = self.inner.local_total_elapsed_us.get();
-        if local_total > FLUSH_LOCAL_THRESHOLD_US {
+        if self.inner.should_flush() {
             self.inner.flush();
             self.manager.maybe_adjust_chance();
         }
