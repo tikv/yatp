@@ -6,6 +6,7 @@ mod yatp_callback {
     use criterion::*;
     use std::sync::atomic::*;
     use std::sync::*;
+    use yatp::queue::priority::Priority;
     use yatp::task::callback::Handle;
 
     pub fn ping_pong(b: &mut Bencher<'_>, ping_count: usize) {
@@ -53,6 +54,7 @@ mod yatp_future {
     use std::sync::atomic::*;
     use std::sync::*;
     use tokio::sync::oneshot;
+    use yatp::queue::priority::Priority;
     use yatp::queue::priority::TaskPriorityProvider;
     use yatp::task::future::TaskCell;
 
@@ -110,9 +112,9 @@ mod yatp_future {
     pub fn ping_pong_priority(b: &mut Bencher<'_>, ping_count: usize) {
         struct ConstantPriorityPrivider;
         impl TaskPriorityProvider for ConstantPriorityPrivider {
-            fn priority_of(&self, _extras: &yatp::queue::Extras) -> u64 {
+            fn priority_of(&self, _extras: &yatp::queue::Extras) -> Priority {
                 // return a constant value so the queue workes the same as FIFO queue.
-                0
+                Priority::default()
             }
         }
         let pool = yatp::Builder::new("ping_pong")

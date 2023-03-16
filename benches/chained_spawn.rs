@@ -36,6 +36,7 @@ mod yatp_callback {
 mod yatp_future {
     use criterion::*;
     use std::sync::{mpsc, Arc};
+    use yatp::queue::priority::Priority;
     use yatp::queue::priority::TaskPriorityProvider;
     use yatp::task::future::TaskCell;
     use yatp::Remote;
@@ -79,9 +80,9 @@ mod yatp_future {
         struct ConstantPriorityPrivider;
 
         impl TaskPriorityProvider for ConstantPriorityPrivider {
-            fn priority_of(&self, _extras: &yatp::queue::Extras) -> u64 {
+            fn priority_of(&self, _extras: &yatp::queue::Extras) -> Priority {
                 // return a constant value so the queue workes the same as FIFO queue.
-                0
+                Priority::default()
             }
         }
         let pool = yatp::Builder::new("chained_spawn")

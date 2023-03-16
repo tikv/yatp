@@ -70,13 +70,17 @@ where
     }
 }
 
-/// priority key
+/// Priority represents the priority of a task.
 #[derive(PartialEq, Copy, Clone, PartialOrd, Eq, Ord, Default)]
 pub struct Priority {
-    ///
-    pub priority: u64,
+    /// 
+    pub group_priority: u64,
     ///
     pub vt: u64,
+}
+
+impl Priority {
+    fn new(
 }
 
 /// A trait used to generate priority value for each task.
@@ -437,8 +441,8 @@ mod tests {
     struct OrderByIdProvider;
 
     impl TaskPriorityProvider for OrderByIdProvider {
-        fn priority_of(&self, extras: &Extras) -> u64 {
-            return extras.task_id();
+        fn priority_of(&self, extras: &Extras) -> Priority {
+            Priority::default()
         }
     }
 
