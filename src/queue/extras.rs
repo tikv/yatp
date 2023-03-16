@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 /// The extras for the task cells pushed into a queue.
 #[derive(Debug, Clone)]
 pub struct Extras {
+    /// the instant when the task is spawned.
     pub(crate) start_time: Instant,
     /// The instant when the task cell is pushed to the queue.
     pub(crate) schedule_time: Option<Instant>,

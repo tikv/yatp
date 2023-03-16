@@ -18,15 +18,11 @@ use std::{
 
 use crossbeam_skiplist::SkipMap;
 use crossbeam_utils::atomic::AtomicCell;
-use prometheus::local::LocalIntCounter;
-use prometheus::IntCounter;
 
-use crate::metrics::*;
-use crate::pool::{Local, Runner, RunnerBuilder};
 use crate::queue::{
     multilevel::{
-        now, TaskLevelManager, DEFAULT_CLEANUP_OLD_MAP_INTERVAL, FLUSH_LOCAL_THRESHOLD_US,
-        LEVEL_NUM,
+        now, MultiLevelMetrics, TaskLevelManager, TrackedRunnerBuilder,
+        DEFAULT_CLEANUP_OLD_MAP_INTERVAL, LEVEL_NUM,
     },
     Extras, Pop, TaskCell,
 };
@@ -162,89 +158,6 @@ impl<T> Slot<T> {
     }
 }
 
-/// The runner for priority queues.
-///
-/// The runner helps collect additional information to support auto-adjust task level.
-/// [`PriorityRunnerBuiler`] is the [`RunnerBuilder`] for this runner.
-pub struct PriorityRunner<R> {
-    inner: R,
-    local_level0_elapsed_us: LocalIntCounter,
-    local_total_elapsed_us: LocalIntCounter,
-}
-
-impl<R, T> Runner for PriorityRunner<R>
-where
-    R: Runner<TaskCell = T>,
-    T: TaskCell,
-{
-    type TaskCell = T;
-
-    fn start(&mut self, local: &mut Local<T>) {
-        self.inner.start(local)
-    }
-
-    fn handle(&mut self, local: &mut Local<T>, mut task_cell: T) -> bool {
-        let extras = task_cell.mut_extras();
-        let level = extras.current_level();
-        let total_running_time = extras.total_running_time.clone();
-        let begin = Instant::now();
-        let res = self.inner.handle(local, task_cell);
-        let elapsed = begin.elapsed();
-        let elapsed_us = elapsed.as_micros() as u64;
-        if let Some(ref running_time) = total_running_time {
-            running_time.inc_by(elapsed);
-        }
-        if level == 0 {
-            self.local_level0_elapsed_us.inc_by(elapsed_us);
-        }
-        self.local_total_elapsed_us.inc_by(elapsed_us);
-        let local_total = self.local_total_elapsed_us.get();
-        if local_total > FLUSH_LOCAL_THRESHOLD_US {
-            self.local_level0_elapsed_us.flush();
-            self.local_total_elapsed_us.flush();
-        }
-        res
-    }
-
-    fn pause(&mut self, local: &mut Local<Self::TaskCell>) -> bool {
-        self.inner.pause(local)
-    }
-
-    fn resume(&mut self, local: &mut Local<Self::TaskCell>) {
-        self.inner.resume(local)
-    }
-
-    fn end(&mut self, local: &mut Local<Self::TaskCell>) {
-        self.inner.end(local)
-    }
-}
-
-/// The runner builder for priority task queues.
-///
-/// It can be created by [`Builder::runner_builder`].
-pub struct PriorityRunnerBuiler<B> {
-    inner: B,
-    level0_elapsed_us: IntCounter,
-    total_elapsed_us: IntCounter,
-}
-
-impl<B, R, T> RunnerBuilder for PriorityRunnerBuiler<B>
-where
-    B: RunnerBuilder<Runner = R>,
-    R: Runner<TaskCell = T>,
-    T: TaskCell,
-{
-    type Runner = PriorityRunner<R>;
-
-    fn build(&mut self) -> Self::Runner {
-        PriorityRunner {
-            inner: self.inner.build(),
-            local_level0_elapsed_us: self.level0_elapsed_us.local(),
-            local_total_elapsed_us: self.total_elapsed_us.local(),
-        }
-    }
-}
-
 /// The configurations of priority task queues.
 pub struct Config {
     name: Option<String>,
@@ -286,8 +199,7 @@ impl Default for Config {
 /// The builder of a priority task queue.
 pub struct Builder {
     manager: PriorityTaskManager,
-    level0_elapsed_us: IntCounter,
-    total_elapsed_us: IntCounter,
+    metrics: MultiLevelMetrics,
 }
 
 impl Builder {
@@ -298,21 +210,7 @@ impl Builder {
             cleanup_interval,
             level_time_threshold,
         } = config;
-        let (level0_elapsed_us, total_elapsed_us) = if let Some(name) = name {
-            (
-                MULTILEVEL_LEVEL_ELAPSED
-                    .get_metric_with_label_values(&[&name, "0"])
-                    .unwrap(),
-                MULTILEVEL_LEVEL_ELAPSED
-                    .get_metric_with_label_values(&[&name, "total"])
-                    .unwrap(),
-            )
-        } else {
-            (
-                IntCounter::new("_", "_").unwrap(),
-                IntCounter::new("_", "_").unwrap(),
-            )
-        };
+        let metrics = MultiLevelMetrics::new(name.as_deref());
         Self {
             manager: PriorityTaskManager {
                 level_manager: Arc::new(TaskLevelManager::new(
@@ -321,18 +219,13 @@ impl Builder {
                 )),
                 priority_manager,
             },
-            level0_elapsed_us,
-            total_elapsed_us,
+            metrics,
         }
     }
 
     /// Creates a runner builder for the multilevel task queue with a normal runner builder.
-    pub fn runner_builder<B>(&self, inner_runner_builder: B) -> PriorityRunnerBuiler<B> {
-        PriorityRunnerBuiler {
-            inner: inner_runner_builder,
-            level0_elapsed_us: self.level0_elapsed_us.clone(),
-            total_elapsed_us: self.total_elapsed_us.clone(),
-        }
+    pub fn runner_builder<B>(&self, inner_runner_builder: B) -> TrackedRunnerBuilder<B> {
+        TrackedRunnerBuilder::new(inner_runner_builder, self.metrics.clone(), true)
     }
 
     /// Returns a function for trying to cleanup task elapsed map.
@@ -378,6 +271,8 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use crate::metrics::*;
+    use crate::pool::{build_spawn, Local, Runner, RunnerBuilder};
     use crate::queue::{
         multilevel::{now, recent},
         Extras, InjectorInner,
@@ -532,5 +427,81 @@ mod tests {
         cleanup();
         cleanup();
         assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_metrics() {
+        let name = "test_priority_metrics";
+        let builder = Builder::new(
+            Config::default().name(Some(name)),
+            Arc::new(OrderByIdProvider),
+        );
+        let mut runner = builder.runner_builder(MockRunnerBuilder).build();
+        let (remote, mut locals) = build_spawn(builder, Default::default());
+
+        for i in 0..4 {
+            remote.spawn(MockTask::new(35, i));
+        }
+        while let Some(Pop { task_cell, .. }) = locals[0].pop() {
+            assert!(runner.handle(&mut locals[0], task_cell));
+        }
+
+        // we spawn 4 tasks here but the metrics of the last one is not flush, so only check the first 3 here.
+        assert!(
+            MULTILEVEL_LEVEL_ELAPSED
+                .get_metric_with_label_values(&[name, "0"])
+                .unwrap()
+                .get()
+                > 100_000
+        );
+        assert!(
+            TASK_WAIT_DURATION
+                .get_metric_with_label_values(&[name])
+                .unwrap()
+                .get_sample_count()
+                >= 3
+        );
+        assert!(
+            TASK_EXEC_DURATION
+                .get_metric_with_label_values(&[name])
+                .unwrap()
+                .get_sample_count()
+                >= 3
+        );
+        assert!(
+            TASK_EXEC_DURATION
+                .get_metric_with_label_values(&[name])
+                .unwrap()
+                .get_sample_sum()
+                >= 0.1
+        );
+        assert!(
+            TASK_POLL_DURATION
+                .get_metric_with_label_values(&[name, "0"])
+                .unwrap()
+                .get_sample_count()
+                >= 3
+        );
+        assert!(
+            TASK_POLL_DURATION
+                .get_metric_with_label_values(&[name, "0"])
+                .unwrap()
+                .get_sample_sum()
+                >= 0.1
+        );
+        assert!(
+            TASK_EXEC_TIMES
+                .get_metric_with_label_values(&[name])
+                .unwrap()
+                .get_sample_count()
+                >= 3
+        );
+        assert!(
+            TASK_EXEC_TIMES
+                .get_metric_with_label_values(&[name])
+                .unwrap()
+                .get_sample_sum()
+                >= 3.0
+        );
     }
 }
