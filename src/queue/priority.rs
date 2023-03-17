@@ -71,16 +71,31 @@ where
 }
 
 /// Priority represents the priority of a task.
-#[derive(PartialEq, Copy, Clone, PartialOrd, Eq, Ord, Default)]
+/// Tasks with smaller priority value will be scheduled earlier than bigger ones.
+#[derive(PartialEq, Copy, Clone, Eq, PartialOrd)]
 pub struct Priority {
-    /// 
+    /// The priority of the group this task belongs to, ordered in descending order.
     pub group_priority: u64,
-    ///
-    pub vt: u64,
+    /// The priority value of this task.
+    pub value: u64,
 }
 
-impl Priority {
-    fn new(
+impl Default for Priority {
+    fn default() -> Self {
+        Priority {
+            group_priority: 8,
+            value: 0,
+        }
+    }
+}
+
+impl Ord for Priority {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .group_priority
+            .cmp(&self.group_priority)
+            .then_with(|| self.value.cmp(&other.value))
+    }
 }
 
 /// A trait used to generate priority value for each task.
@@ -442,7 +457,10 @@ mod tests {
 
     impl TaskPriorityProvider for OrderByIdProvider {
         fn priority_of(&self, extras: &Extras) -> Priority {
-            Priority::default()
+            Priority {
+                group_priority: extras.current_level(),
+                value: extras.task_id(),
+            }
         }
     }
 
