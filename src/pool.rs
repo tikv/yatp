@@ -27,6 +27,12 @@ pub struct ThreadPool<T: TaskCell + Send> {
 }
 
 impl<T: TaskCell + Send> ThreadPool<T> {
+    /// Return the min thread count and the max thread count that this pool can scale.
+    pub fn thread_count_limit(&self) -> (usize, usize) {
+        let cfg = self.remote.core.config();
+        (cfg.min_thread_count, cfg.max_thread_count)
+    }
+
     /// Spawns the task into the thread pool.
     ///
     /// If the pool is shutdown, it becomes no-op.
