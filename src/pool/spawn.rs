@@ -148,6 +148,10 @@ impl<T> QueueCore<T> {
             .core_thread_count
             .store(new_thread_count, Ordering::SeqCst);
     }
+
+    pub fn config(&self) -> &SchedConfig {
+        &self.config
+    }
 }
 
 impl<T: TaskCell + Send> QueueCore<T> {
