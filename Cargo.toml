@@ -24,7 +24,7 @@ rand = "0.8"
 failpoints = ["fail/failpoints"]
 
 [dev-dependencies]
-criterion = "0.4"
+criterion = "0.5"
 tokio = { version = "1.0", features = ["sync", "rt-multi-thread"] }
 async-std = "1.0"
 threadpool = "1.0"
