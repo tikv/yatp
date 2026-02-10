@@ -14,7 +14,7 @@ pub mod priority;
 mod extras;
 mod single_level;
 
-pub use self::extras::Extras;
+pub use self::extras::{AcquireState, Extras, TaskSource};
 
 use std::time::Instant;
 
@@ -74,9 +74,8 @@ pub struct Pop<T> {
     /// When the task was pushed to the queue.
     pub schedule_time: Instant,
 
-    /// Whether the task comes from the current [`LocalQueue`] instead of being
-    /// just stolen from the injector or other [`LocalQueue`]s.
-    pub from_local: bool,
+    /// The source of the task, indicating where the task comes from.
+    pub task_source: TaskSource,
 }
 
 /// The local queue of a task queue.
