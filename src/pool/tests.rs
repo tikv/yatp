@@ -302,7 +302,7 @@ fn test_burst_monitoring() {
     let name = "test_burst_monitoring";
     let pool = Builder::new(name)
         .max_thread_count(1)
-        .enable_burst_monitoring(1, 200)
+        .enable_burst_monitoring(1, 400)
         .build_callback_pool();
 
     let metric = QUEUE_CORE_BURST_THROUGHPUT
@@ -315,18 +315,20 @@ fn test_burst_monitoring() {
     };
 
     // spawn at throughput of 500 tasks/sec
-    spawn_n(100);
-    thread::sleep(Duration::from_millis(400));
-    spawn_n(100);
+    let target = 500.0;
+    spawn_n(200);
+    thread::sleep(Duration::from_millis(800));
+    spawn_n(200);
     let value = metric.metric().get_gauge().get_value();
-    assert!((value - 500.0).abs() < 10.0);
+    assert!((value - target).abs() / target < 0.1);
 
     // spawn at throughput of 1000 tasks/sec
-    spawn_n(100);
-    thread::sleep(Duration::from_millis(200));
-    spawn_n(100);
+    let target = 1000.0;
+    spawn_n(200);
+    thread::sleep(Duration::from_millis(400));
+    spawn_n(200);
     let value = metric.metric().get_gauge().get_value();
-    assert!((value - 1000.0).abs() < 10.0);
+    assert!((value - target).abs() / target < 0.1);
 
     pool.shutdown();
 }

@@ -6,7 +6,8 @@ use lazy_static::lazy_static;
 use prometheus::core::{Collector, Desc, Metric, MetricVec, MetricVecBuilder};
 use prometheus::*;
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 lazy_static! {
     /// Elapsed time of each level in the multilevel task queue.
@@ -115,16 +116,54 @@ fn new_histogram_opts(name: &str, help: &str, buckets: Vec<f64>) -> HistogramOpt
 #[derive(Clone, Debug)]
 pub struct MaxGauge {
     gauge: Gauge,
+    max_val: Arc<AtomicU64>,
 }
 
 impl MaxGauge {
-    /// Observe a value, keeping the maximum since the last scrape. Note that it's not a accurate maximum if there are
-    /// concurrent calls to `observe`, but it should be good enough for most use cases.
-    pub fn observe(&self, v: f64) {
-        let current = self.gauge.get();
-        if v > current {
-            self.gauge.set(v);
+    /// Wraps a `Gauge` to create a `MaxGauge`. The `Gauge` should not be used directly after being wrapped, otherwise
+    /// the maximum tracking will be broken.
+    pub fn wrap(gauge: Gauge) -> Self {
+        let val = gauge.get().to_bits();
+        Self {
+            gauge,
+            max_val: Arc::new(AtomicU64::new(val)),
         }
+    }
+
+    /// Observe a value, keeping the maximum since the last scrape.
+    pub fn observe(&self, v: f64) {
+        if !v.is_finite() {
+            return;
+        }
+        let mut current = self.max_val.load(Ordering::Relaxed);
+        loop {
+            if v <= f64::from_bits(current) {
+                break;
+            }
+            match self.max_val.compare_exchange_weak(
+                current,
+                v.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.gauge.set(v);
+                    break;
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Get the current maximum value without resetting it.
+    pub fn get(&self) -> f64 {
+        let val = self.max_val.load(Ordering::Relaxed);
+        f64::from_bits(val)
+    }
+
+    fn take(&self) -> f64 {
+        let val = self.max_val.swap(0f64.to_bits(), Ordering::Relaxed);
+        f64::from_bits(val)
     }
 }
 
@@ -134,17 +173,17 @@ impl Collector for MaxGauge {
     }
 
     fn collect(&self) -> Vec<proto::MetricFamily> {
-        let mfs = self.gauge.collect();
-        self.gauge.set(0.0);
-        mfs
+        let val = self.take();
+        self.gauge.set(val);
+        self.gauge.collect()
     }
 }
 
 impl Metric for MaxGauge {
     fn metric(&self) -> proto::Metric {
-        let m = self.gauge.metric();
-        self.gauge.set(0.0);
-        m
+        let val = self.take();
+        self.gauge.set(val);
+        self.gauge.metric()
     }
 }
 
@@ -171,7 +210,7 @@ impl MetricVecBuilder for MaxGaugeVecBuilder {
         opts.variable_labels.clear();
 
         let gauge = Gauge::with_opts(opts)?;
-        Ok(MaxGauge { gauge })
+        Ok(MaxGauge::wrap(gauge))
     }
 }
 
@@ -217,15 +256,16 @@ mod tests {
     #[test]
     fn test_max_gauge_resets_on_metric() {
         let gauge = Gauge::with_opts(Opts::new("test_max_gauge", "test max gauge")).unwrap();
-        let max = MaxGauge { gauge };
+        let max = MaxGauge::wrap(gauge);
 
         max.observe(1.0);
         max.observe(3.0);
         max.observe(2.0);
-        assert_eq!(max.gauge.get(), 3.0);
+        assert_eq!(max.get(), 3.0);
 
         let _ = max.metric();
-        assert_eq!(max.gauge.get(), 0.0);
+        assert_eq!(max.get(), 0.0);
+        assert_eq!(max.gauge.get(), 3.0);
     }
 
     #[test]
@@ -247,6 +287,6 @@ mod tests {
         assert_eq!(metric.get_label()[0].get_value(), "v1");
         assert_eq!(metric.get_gauge().get_value(), 5.0);
 
-        assert_eq!(m.gauge.get(), 0.0);
+        assert_eq!(m.get(), 0.0);
     }
 }
