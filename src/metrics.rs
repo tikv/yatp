@@ -198,6 +198,12 @@ impl MaxGaugeVecBuilder {
     }
 }
 
+impl Default for MaxGaugeVecBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricVecBuilder for MaxGaugeVecBuilder {
     type M = MaxGauge;
     type P = Opts;

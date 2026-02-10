@@ -128,8 +128,10 @@ impl<T: TaskCell + Send> LocalQueue<T> {
 }
 
 /// Supported available queues.
+#[derive(Default)]
 pub enum QueueType {
     /// A single level work stealing queue.
+    #[default]
     SingleLevel,
     /// A multilevel feedback queue.
     ///
@@ -137,12 +139,6 @@ pub enum QueueType {
     Multilevel(multilevel::Builder),
     /// A concurrent prioirty queue.
     Priority(priority::Builder),
-}
-
-impl Default for QueueType {
-    fn default() -> QueueType {
-        QueueType::SingleLevel
-    }
 }
 
 impl From<multilevel::Builder> for QueueType {
