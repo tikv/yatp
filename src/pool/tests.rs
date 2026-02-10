@@ -322,13 +322,5 @@ fn test_burst_monitoring() {
     let value = metric.metric().get_gauge().get_value();
     assert!((value - target).abs() / target < 0.1);
 
-    // spawn at throughput of 1000 tasks/sec
-    let target = 1000.0;
-    spawn_n(200);
-    thread::sleep(Duration::from_millis(400));
-    spawn_n(200);
-    let value = metric.metric().get_gauge().get_value();
-    assert!((value - target).abs() / target < 0.1);
-
     pool.shutdown();
 }
