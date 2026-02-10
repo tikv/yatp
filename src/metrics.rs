@@ -3,7 +3,9 @@
 //! Metrics of the thread pool.
 
 use lazy_static::lazy_static;
+use prometheus::core::{Collector, Desc, Metric, MetricVec, MetricVecBuilder};
 use prometheus::*;
+
 use std::sync::Mutex;
 
 lazy_static! {
@@ -71,6 +73,16 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Max enqueue throughput of the global task injector (QueueCore) since last scrape.
+    pub static ref QUEUE_CORE_BURST_THROUGHPUT: MaxGaugeVec = MaxGaugeVec::new(
+        new_opts(
+            "yatp_queue_core_burst_throughput",
+            "max enqueue throughput (tasks/sec) of the global task injector since last scrape"
+        ),
+        &["name"]
+    )
+    .unwrap();
+
     static ref NAMESPACE: Mutex<Option<String>> = Mutex::new(None);
 }
 
@@ -97,4 +109,144 @@ fn new_histogram_opts(name: &str, help: &str, buckets: Vec<f64>) -> HistogramOpt
     }
 
     opts
+}
+
+/// A gauge that tracks the maximum value since the last scrape.
+#[derive(Clone, Debug)]
+pub struct MaxGauge {
+    gauge: Gauge,
+}
+
+impl MaxGauge {
+    /// Observe a value, keeping the maximum since the last scrape. Note that it's not a accurate maximum if there are
+    /// concurrent calls to `observe`, but it should be good enough for most use cases.
+    pub fn observe(&self, v: f64) {
+        let current = self.gauge.get();
+        if v > current {
+            self.gauge.set(v);
+        }
+    }
+}
+
+impl Collector for MaxGauge {
+    fn desc(&self) -> Vec<&Desc> {
+        self.gauge.desc()
+    }
+
+    fn collect(&self) -> Vec<proto::MetricFamily> {
+        let mfs = self.gauge.collect();
+        self.gauge.set(0.0);
+        mfs
+    }
+}
+
+impl Metric for MaxGauge {
+    fn metric(&self) -> proto::Metric {
+        let m = self.gauge.metric();
+        self.gauge.set(0.0);
+        m
+    }
+}
+
+/// Builder for `MaxGaugeVec`.
+#[derive(Clone, Debug)]
+pub struct MaxGaugeVecBuilder;
+
+impl MaxGaugeVecBuilder {
+    /// Create a new `MaxGaugeVecBuilder`.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl MetricVecBuilder for MaxGaugeVecBuilder {
+    type M = MaxGauge;
+    type P = Opts;
+
+    fn build(&self, opts: &Opts, vals: &[&str]) -> Result<Self::M> {
+        let mut opts = opts.clone();
+        for (name, val) in opts.variable_labels.iter().zip(vals.iter()) {
+            opts.const_labels.insert(name.clone(), (*val).to_owned());
+        }
+        opts.variable_labels.clear();
+
+        let gauge = Gauge::with_opts(opts)?;
+        Ok(MaxGauge { gauge })
+    }
+}
+
+/// A `MetricVec` for `MaxGauge` values, partitioned by label values.
+#[derive(Clone, Debug)]
+pub struct MaxGaugeVec {
+    inner: MetricVec<MaxGaugeVecBuilder>,
+}
+
+impl MaxGaugeVec {
+    /// Create a new `MaxGaugeVec` with the given label names.
+    pub fn new(opts: Opts, label_names: &[&str]) -> Result<Self> {
+        let variable_names = label_names.iter().map(|s| (*s).to_owned()).collect();
+        let opts = opts.variable_labels(variable_names);
+        let inner = MetricVec::create(proto::MetricType::GAUGE, MaxGaugeVecBuilder::new(), opts)?;
+
+        Ok(Self { inner })
+    }
+}
+
+impl std::ops::Deref for MaxGaugeVec {
+    type Target = MetricVec<MaxGaugeVecBuilder>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Collector for MaxGaugeVec {
+    fn desc(&self) -> Vec<&Desc> {
+        self.inner.desc()
+    }
+
+    fn collect(&self) -> Vec<proto::MetricFamily> {
+        self.inner.collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_max_gauge_resets_on_metric() {
+        let gauge = Gauge::with_opts(Opts::new("test_max_gauge", "test max gauge")).unwrap();
+        let max = MaxGauge { gauge };
+
+        max.observe(1.0);
+        max.observe(3.0);
+        max.observe(2.0);
+        assert_eq!(max.gauge.get(), 3.0);
+
+        let _ = max.metric();
+        assert_eq!(max.gauge.get(), 0.0);
+    }
+
+    #[test]
+    fn test_max_gauge_vec_resets_on_collect() {
+        let vec = MaxGaugeVec::new(
+            Opts::new("test_max_gauge_vec", "test max gauge vec"),
+            &["l1"],
+        )
+        .unwrap();
+        let m = vec.with_label_values(&["v1"]);
+        m.observe(5.0);
+
+        let mfs = vec.collect();
+        assert_eq!(mfs.len(), 1);
+        let mf = &mfs[0];
+        let metric = mf.get_metric().get(0).unwrap();
+        assert_eq!(metric.get_label().len(), 1);
+        assert_eq!(metric.get_label()[0].get_name(), "l1");
+        assert_eq!(metric.get_label()[0].get_value(), "v1");
+        assert_eq!(metric.get_gauge().get_value(), 5.0);
+
+        assert_eq!(m.gauge.get(), 0.0);
+    }
 }

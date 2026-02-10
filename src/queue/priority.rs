@@ -341,6 +341,7 @@ mod tests {
         let core = Arc::new(crate::pool::spawn::QueueCore::new(
             injecter,
             crate::pool::SchedConfig::default(),
+            None,
         ));
         let mut locals: Vec<_> = locals
             .into_iter()

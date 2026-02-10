@@ -1,8 +1,10 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::metrics::QUEUE_CORE_BURST_THROUGHPUT;
 use crate::pool::*;
 use crate::task::callback::Handle;
 use futures_timer::Delay;
+use prometheus::core::Metric as _;
 use rand::seq::SliceRandom;
 use std::sync::mpsc;
 use std::thread;
@@ -291,6 +293,40 @@ fn test_scale_down_workers() {
         ans.push(r);
     }
     assert_eq!(cases, ans);
+
+    pool.shutdown();
+}
+
+#[test]
+fn test_burst_monitoring() {
+    let name = "test_burst_monitoring";
+    let pool = Builder::new(name)
+        .max_thread_count(1)
+        .enable_burst_monitoring(1, 200)
+        .build_callback_pool();
+
+    let metric = QUEUE_CORE_BURST_THROUGHPUT
+        .get_metric_with_label_values(&[name])
+        .unwrap();
+    let spawn_n = |n| {
+        for _ in 0..n {
+            pool.spawn(|_: &mut Handle<'_>| {});
+        }
+    };
+
+    // spawn at throughput of 500 tasks/sec
+    spawn_n(100);
+    thread::sleep(Duration::from_millis(400));
+    spawn_n(100);
+    let value = metric.metric().get_gauge().get_value();
+    assert!((value - 500.0).abs() < 10.0);
+
+    // spawn at throughput of 1000 tasks/sec
+    spawn_n(100);
+    thread::sleep(Duration::from_millis(200));
+    spawn_n(100);
+    let value = metric.metric().get_gauge().get_value();
+    assert!((value - 1000.0).abs() < 10.0);
 
     pool.shutdown();
 }
