@@ -288,8 +288,10 @@ impl<T> Clone for Remote<T> {
 /// Note that implements of Runner assumes `Remote` is `Sync` and `Send`.
 /// So we need to use assert trait to ensure the constraint at compile time
 /// to avoid future breaks.
+#[allow(dead_code)]
 trait AssertSync: Sync {}
 impl<T: Send> AssertSync for Remote<T> {}
+#[allow(dead_code)]
 trait AssertSend: Send {}
 impl<T: Send> AssertSend for Remote<T> {}
 
