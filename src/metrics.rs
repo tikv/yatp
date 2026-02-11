@@ -112,7 +112,8 @@ fn new_histogram_opts(name: &str, help: &str, buckets: Vec<f64>) -> HistogramOpt
     opts
 }
 
-/// A gauge that tracks the maximum value since the last scrape.
+/// A gauge that tracks the maximum value since the last scrape. Note that it aims to track positive values, negative
+/// values are ignored since `max_val` is reset to 0 after each scrape.
 #[derive(Clone, Debug)]
 pub struct MaxGauge {
     gauge: Gauge,
@@ -123,10 +124,10 @@ impl MaxGauge {
     /// Wraps a `Gauge` to create a `MaxGauge`. The `Gauge` should not be used directly after being wrapped, otherwise
     /// the maximum tracking will be broken.
     pub fn wrap(gauge: Gauge) -> Self {
-        let val = gauge.get().to_bits();
+        let val = gauge.get().max(0f64);
         Self {
             gauge,
-            max_val: Arc::new(AtomicU64::new(val)),
+            max_val: Arc::new(AtomicU64::new(val.to_bits())),
         }
     }
 
@@ -146,10 +147,7 @@ impl MaxGauge {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => {
-                    self.gauge.set(v);
-                    break;
-                }
+                Ok(_) => break,
                 Err(actual) => current = actual,
             }
         }
