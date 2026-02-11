@@ -8,10 +8,12 @@ use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{FilterOp, ParkResult, ParkToken, UnparkToken};
+use prometheus::local::LocalCounter;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Weak,
 };
+use std::time::Instant;
 
 /// An usize is used to trace the threads that are working actively.
 /// To save additional memory and atomic operation, the number and
@@ -25,6 +27,8 @@ use std::sync::{
 const SHUTDOWN_BIT: usize = 1;
 const WORKER_COUNT_SHIFT: usize = 1;
 const WORKER_COUNT_BASE: usize = 2;
+const ACTIVE_TIME_FLUSH_THRESHOLD_SECS: f64 = 1.0;
+const ACTIVE_TIME_SAMPLE_EVERY_TASKS: u32 = 256;
 
 /// Checks if shutdown bit is set.
 pub fn is_shutdown(cnt: usize) -> bool {
@@ -208,8 +212,10 @@ impl<T> Clone for Remote<T> {
 /// Note that implements of Runner assumes `Remote` is `Sync` and `Send`.
 /// So we need to use assert trait to ensure the constraint at compile time
 /// to avoid future breaks.
+#[allow(dead_code)]
 trait AssertSync: Sync {}
 impl<T: Send> AssertSync for Remote<T> {}
+#[allow(dead_code)]
 trait AssertSend: Send {}
 impl<T: Send> AssertSend for Remote<T> {}
 
@@ -240,6 +246,81 @@ impl<T> Clone for WeakRemote<T> {
 
 impl<T: Send> AssertSync for WeakRemote<T> {}
 impl<T: Send> AssertSend for WeakRemote<T> {}
+struct WorkerActivity {
+    counter: LocalCounter,
+    active_since: Option<Instant>,
+    ticks: u32,
+}
+
+impl WorkerActivity {
+    fn new(counter: LocalCounter) -> WorkerActivity {
+        WorkerActivity {
+            counter,
+            active_since: None,
+            ticks: 0,
+        }
+    }
+
+    #[inline]
+    fn on_start(&mut self) {
+        self.active_since = Some(Instant::now());
+    }
+
+    #[inline]
+    fn on_task_complete(&mut self) {
+        self.ticks = self.ticks.wrapping_add(1);
+        if self.ticks == ACTIVE_TIME_SAMPLE_EVERY_TASKS {
+            self.ticks = 0;
+            self.checkpoint();
+        }
+    }
+
+    #[inline]
+    fn on_park(&mut self) {
+        let now = Instant::now();
+        self.add_elapsed(now);
+        self.active_since = None;
+        self.counter.flush();
+    }
+
+    #[inline]
+    fn on_unpark(&mut self) {
+        if self.active_since.is_none() {
+            self.active_since = Some(Instant::now());
+        }
+    }
+
+    #[inline]
+    fn on_end(&mut self) {
+        let now = Instant::now();
+        self.add_elapsed(now);
+        self.active_since = None;
+        self.counter.flush();
+    }
+
+    #[inline]
+    fn checkpoint(&mut self) {
+        if self.active_since.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        self.add_elapsed(now);
+        self.active_since = Some(now);
+        if self.counter.get() >= ACTIVE_TIME_FLUSH_THRESHOLD_SECS {
+            self.counter.flush();
+        }
+    }
+
+    #[inline]
+    fn add_elapsed(&mut self, now: Instant) {
+        if let Some(since) = self.active_since {
+            let elapsed = now.saturating_duration_since(since);
+            if !elapsed.is_zero() {
+                self.counter.inc_by(elapsed.as_secs_f64());
+            }
+        }
+    }
+}
 
 /// Spawns tasks to the associated thread pool.
 ///
@@ -250,6 +331,7 @@ pub struct Local<T> {
     id: usize,
     local_queue: LocalQueue<T>,
     core: Arc<QueueCore<T>>,
+    activity: Option<WorkerActivity>,
 }
 
 impl<T: TaskCell + Send> Local<T> {
@@ -258,6 +340,7 @@ impl<T: TaskCell + Send> Local<T> {
             id,
             local_queue,
             core,
+            activity: None,
         }
     }
 
@@ -297,21 +380,31 @@ impl<T: TaskCell + Send> Local<T> {
     /// If there are no tasks at the moment, it will go to sleep until woken
     /// up by other threads.
     pub(crate) fn pop_or_sleep(&mut self) -> Option<Pop<T>> {
-        let address = &*self.core as *const QueueCore<T> as usize;
+        let Local {
+            id,
+            local_queue,
+            core,
+            activity,
+        } = self;
+        let address = &**core as *const QueueCore<T> as usize;
         let mut task = None;
-        let id = self.id;
+        let id = *id;
 
         let res = unsafe {
             parking_lot_core::park(
                 address,
                 || {
-                    if !self.core.mark_sleep() {
+                    if !core.mark_sleep() {
                         return false;
                     }
-                    task = self.local_queue.pop();
+                    task = local_queue.pop();
                     task.is_none()
                 },
-                || {},
+                || {
+                    if let Some(activity) = activity.as_mut() {
+                        activity.on_park();
+                    }
+                },
                 |_, _| {},
                 ParkToken(id),
                 None,
@@ -319,7 +412,10 @@ impl<T: TaskCell + Send> Local<T> {
         };
         match res {
             ParkResult::Unparked(_) | ParkResult::Invalid => {
-                self.core.mark_woken();
+                core.mark_woken();
+                if let Some(activity) = activity.as_mut() {
+                    activity.on_unpark();
+                }
                 task
             }
             ParkResult::TimedOut => unreachable!(),
@@ -332,6 +428,28 @@ impl<T: TaskCell + Send> Local<T> {
     pub(crate) fn need_preempt(&mut self) -> bool {
         fail_point!("need-preempt", |r| { r.unwrap().parse().unwrap() });
         self.local_queue.has_tasks_or_pull()
+    }
+
+    pub(crate) fn enable_worker_activity(&mut self, counter: LocalCounter) {
+        self.activity = Some(WorkerActivity::new(counter));
+    }
+
+    pub(crate) fn on_worker_start(&mut self) {
+        if let Some(activity) = self.activity.as_mut() {
+            activity.on_start();
+        }
+    }
+
+    pub(crate) fn on_worker_end(&mut self) {
+        if let Some(activity) = self.activity.as_mut() {
+            activity.on_end();
+        }
+    }
+
+    pub(crate) fn on_task_complete(&mut self) {
+        if let Some(activity) = self.activity.as_mut() {
+            activity.on_task_complete();
+        }
     }
 }
 

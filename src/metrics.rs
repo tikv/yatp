@@ -71,6 +71,16 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Total time worker threads are active (not parked), in seconds.
+    pub static ref WORKER_ACTIVE_SECONDS: CounterVec = CounterVec::new(
+        new_opts(
+            "yatp_worker_active_seconds_total",
+            "total time worker threads are active (not parked) in seconds"
+        ),
+        &["name"]
+    )
+    .unwrap();
+
     static ref NAMESPACE: Mutex<Option<String>> = Mutex::new(None);
 }
 

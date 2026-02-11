@@ -40,17 +40,21 @@ where
 
     pub fn run(mut self) {
         self.runner.start(&mut self.local);
+        self.local.on_worker_start();
         while !self.local.core().is_shutdown() {
             let task = match self.pop() {
                 Some(t) => t,
                 None => continue,
             };
             self.runner.handle(&mut self.local, task.task_cell);
+            self.local.on_task_complete();
         }
         self.runner.end(&mut self.local);
 
         // Drain all futures in the queue
         while self.local.pop().is_some() {}
+
+        self.local.on_worker_end();
     }
 }
 
