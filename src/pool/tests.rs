@@ -1,10 +1,15 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::pool::*;
+use crate::queue::QueueType;
+use crate::task::callback;
 use crate::task::callback::Handle;
 use futures_timer::Delay;
 use rand::seq::SliceRandom;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::*;
 
@@ -293,4 +298,148 @@ fn test_scale_down_workers() {
     assert_eq!(cases, ans);
 
     pool.shutdown();
+}
+
+#[test]
+fn test_ensure_workers_unparks_only_core_threads_across_two_calls() {
+    // Setup:
+    //   max_thread_count = 10 (enough to cover all thread IDs)
+    //   core_thread_count = 5 (so IDs <= 5 are eligible: 3 and 2 qualify; 6 and 9 don't)
+    //   active_workers initialized to max_thread_count (10), we'll manually adjust to 4
+    let (remote, locals) = build_spawn(
+        QueueType::SingleLevel,
+        SchedConfig {
+            max_thread_count: 10,
+            min_thread_count: 1,
+            ..SchedConfig::default()
+        },
+    );
+    remote.spawn(move |_: &mut callback::Handle<'_>| {});
+
+    let core = remote.core.clone();
+
+    // Set core_thread_count to 5: IDs <= 5 are "core" threads.
+    core.scale_workers(5);
+
+    // We need to park threads in order: 3, 6, 2, 9.
+    // The `pop_or_sleep` uses thread's `id` as ParkToken.
+    // Locals are created with ids: 1..=10. We pick locals at indices 2,5,1,8 (id=3,6,2,9).
+    // We must park them in exactly this order.
+
+    // Track which threads have been unparked.
+    let unparked_ids = Arc::new(Mutex::new(Vec::new()));
+
+    // We need to park threads sequentially to control FIFO order.
+    // Use barriers to ensure ordering: park 3, then 6, then 2, then 9.
+    let park_order: Vec<usize> = vec![3, 6, 2, 9];
+
+    // Drain the locals we need by id. locals are indexed 0..9 with id = index+1.
+    // Collect them into a map for convenience.
+    let mut locals_by_id: std::collections::HashMap<usize, Local<_>> =
+        locals.into_iter().map(|l| (l.id(), l)).collect();
+
+    let mut handles = Vec::new();
+    let parked_count = Arc::new(AtomicUsize::new(0));
+
+    for &tid in &park_order {
+        let mut local = locals_by_id.remove(&tid).unwrap();
+        let unparked_ids = unparked_ids.clone();
+        let parked_count_clone = parked_count.clone();
+
+        let handle = thread::spawn(move || {
+            // Signal that we're about to park.
+            parked_count_clone.fetch_add(1, Ordering::SeqCst);
+            let _ = local.pop_or_sleep();
+            // Record which thread was unparked.
+            unparked_ids
+                .lock()
+                .expect("Failed to lock unparked_ids")
+                .push(tid);
+        });
+
+        // Wait until this thread is actually parked before parking the next one,
+        // to ensure FIFO order in the parking queue.
+        let expected = parked_count.load(Ordering::SeqCst) + 1;
+        while parked_count.load(Ordering::SeqCst) < expected {
+            thread::yield_now();
+        }
+        // Give a little extra time for the thread to enter the park call.
+        thread::sleep(Duration::from_millis(50));
+
+        handles.push(handle);
+    }
+
+    // Now 4 threads are parked. Each called mark_sleep(), so active_workers decreased by 4.
+    // Initial active_workers = 10 << 1 = 20. After 4 mark_sleep calls: 20 - 4*2 = 12 => count = 6.
+    // We need active count = 4, so manually adjust.
+    // Actually, mark_sleep already decremented: 10 - 4 = 6 active workers.
+    // We need active = 4, so decrement 2 more times.
+    core.mark_sleep();
+    core.mark_sleep();
+    // Now active_workers >> 1 = 4, which is < core_thread_count (5), so ensure_workers proceeds.
+
+    // First call: should unpark thread 3 (first in FIFO with id <= 5).
+    core.ensure_workers(100);
+    thread::sleep(Duration::from_millis(100));
+
+    {
+        let ids = unparked_ids.lock().expect("Failed to lock unparked_ids");
+        assert_eq!(
+            ids.len(),
+            1,
+            "First ensure_workers should unpark exactly one thread"
+        );
+        assert_eq!(
+            ids[0], 3,
+            "First unparked thread should be id=3 (first core thread in FIFO)"
+        );
+    }
+
+    // After thread 3 wakes, it calls mark_woken(), so active count goes back up by 1 to 5.
+    // We need active < core_thread_count (5) again for ensure_workers to proceed.
+    // mark_sleep to drop active count.
+    core.mark_sleep();
+    // Now active = 4 again.
+
+    // Second call: should skip thread 6 (id=6 > 5), then unpark thread 2 (id=2 <= 5).
+    core.ensure_workers(200);
+    thread::sleep(Duration::from_millis(100));
+
+    {
+        let ids = unparked_ids.lock().expect("Failed to lock unparked_ids");
+        assert_eq!(
+            ids.len(),
+            2,
+            "Second ensure_workers should unpark one more thread"
+        );
+        assert_eq!(
+            ids[1], 2,
+            "Second unparked thread should be id=2 (next core thread in FIFO)"
+        );
+    }
+
+    // Verify threads 6 and 9 are still parked (not unparked).
+    assert_eq!(
+        unparked_ids
+            .lock()
+            .expect("Failed to lock unparked_ids")
+            .len(),
+        2,
+        "Only 2 threads should have been unparked total"
+    );
+
+    // Clean up: shutdown to unpark remaining threads (6 and 9).
+    core.mark_shutdown(0);
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Final verification: all 4 threads eventually woke up after shutdown.
+    let final_ids = unparked_ids.lock().expect("Failed to lock unparked_ids");
+    assert_eq!(final_ids.len(), 4);
+    assert_eq!(
+        &final_ids[..2],
+        &[3, 2],
+        "Core threads 3 and 2 were unparked by ensure_workers"
+    );
 }
