@@ -46,7 +46,7 @@ enum InjectorInner<T> {
     Priority(priority::TaskInjector<T>),
 }
 
-impl<T: TaskCell + Send> TaskInjector<T> {
+impl<T: TaskCell + Send + 'static> TaskInjector<T> {
     /// Pushes a task to the queue.
     pub fn push(&self, task_cell: T) {
         match &self.0 {
@@ -62,6 +62,25 @@ impl<T: TaskCell + Send> TaskInjector<T> {
             InjectorInner::Multilevel(_) | InjectorInner::Priority(_) => {
                 Extras::multilevel_default()
             }
+        }
+    }
+
+    /// Attempts to evict the lowest-priority task from the queue if the
+    /// incoming priority is strictly higher (lower numeric value).
+    ///
+    /// Returns `Some(task)` on successful eviction, or `None` if:
+    /// - The queue is empty.
+    /// - The incoming priority is not strictly higher than the lowest queued.
+    /// - A concurrent caller already removed the candidate (best-effort).
+    /// - The queue is not a priority queue (single-level and multilevel
+    ///   queues do not support eviction).
+    ///
+    /// Callers may retry on `None` if they need stronger guarantees under
+    /// contention.
+    pub fn try_evict_lowest(&self, incoming_priority: u64) -> Option<T> {
+        match &self.0 {
+            InjectorInner::Priority(q) => q.try_evict(incoming_priority),
+            _ => None,
         }
     }
 }

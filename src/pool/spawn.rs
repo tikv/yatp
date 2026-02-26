@@ -176,7 +176,7 @@ pub struct Remote<T> {
     pub(crate) core: Arc<QueueCore<T>>,
 }
 
-impl<T: TaskCell + Send> Remote<T> {
+impl<T: TaskCell + Send + 'static> Remote<T> {
     pub(crate) fn new(core: Arc<QueueCore<T>>) -> Remote<T> {
         Remote { core }
     }
@@ -190,6 +190,25 @@ impl<T: TaskCell + Send> Remote<T> {
     /// Scales workers of the thread pool.
     pub fn scale_workers(&self, new_thread_count: usize) {
         self.core.scale_workers(new_thread_count)
+    }
+
+    /// Attempts to evict the lowest-priority task from the global queue if the
+    /// incoming priority is strictly higher (lower numeric value).
+    ///
+    /// Returns `Some(task)` on successful eviction, or `None` if:
+    /// - The pool is shut down.
+    /// - The queue is empty.
+    /// - The incoming priority is not strictly higher than the lowest queued.
+    /// - A concurrent caller already removed the candidate (best-effort).
+    /// - The pool does not use a priority queue.
+    ///
+    /// Callers may retry on `None` if they need stronger guarantees under
+    /// contention.
+    pub fn try_evict_lowest(&self, incoming_priority: u64) -> Option<T> {
+        if self.core.is_shutdown() {
+            return None;
+        }
+        self.core.global_queue.try_evict_lowest(incoming_priority)
     }
 
     pub(crate) fn stop(&self) {
@@ -208,8 +227,10 @@ impl<T> Clone for Remote<T> {
 /// Note that implements of Runner assumes `Remote` is `Sync` and `Send`.
 /// So we need to use assert trait to ensure the constraint at compile time
 /// to avoid future breaks.
+#[allow(dead_code)]
 trait AssertSync: Sync {}
 impl<T: Send> AssertSync for Remote<T> {}
+#[allow(dead_code)]
 trait AssertSend: Send {}
 impl<T: Send> AssertSend for Remote<T> {}
 
