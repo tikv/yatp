@@ -6,6 +6,28 @@ use rand::prelude::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The source of a task, indicating where the task comes from when popped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskSource {
+    /// Task popped from the local queue (most efficient path).
+    LocalQueue,
+    /// Task popped from the global injector queue.
+    GlobalQueue,
+    /// Task stolen from another worker's local queue.
+    OtherWorker,
+}
+
+/// Indicates how the worker acquired the task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquireState {
+    /// Task was popped immediately from the local queue without waiting.
+    Immediate,
+    /// Task was acquired after the worker thread spun (busy-waited).
+    AfterSpin,
+    /// Task was acquired after the worker thread was parked (slept).
+    AfterPark,
+}
+
 /// The extras for the task cells pushed into a queue.
 #[derive(Debug, Clone)]
 pub struct Extras {
@@ -32,6 +54,12 @@ pub struct Extras {
     /// Extra metadata of this task. User can use this field to store arbitrary data. It is useful
     /// in some case to implement more complext `TaskPriorityProvider` in the priority task queue.
     pub(crate) metadata: Vec<u8>,
+    /// The source of the task, indicating where the task comes from when popped.
+    /// This field is set when the task is popped from the queue.
+    pub(crate) task_source: Option<TaskSource>,
+    /// Indicates how the worker acquired the task.
+    /// This field is set when the task is popped from the queue.
+    pub(crate) acquire_state: Option<AcquireState>,
 }
 
 impl Extras {
@@ -48,6 +76,8 @@ impl Extras {
             fixed_level: None,
             exec_times: 0,
             metadata: Vec::new(),
+            task_source: None,
+            acquire_state: None,
         }
     }
 
@@ -71,6 +101,8 @@ impl Extras {
             fixed_level,
             exec_times: 0,
             metadata: Vec::new(),
+            task_source: None,
+            acquire_state: None,
         }
     }
 
@@ -109,5 +141,15 @@ impl Extras {
     /// Set the metadata of this task.
     pub fn set_metadata(&mut self, metadata: Vec<u8>) {
         self.metadata = metadata;
+    }
+
+    /// Gets the source of the task.
+    pub fn task_source(&self) -> Option<TaskSource> {
+        self.task_source
+    }
+
+    /// Gets how the worker acquired the task.
+    pub fn acquire_state(&self) -> Option<AcquireState> {
+        self.acquire_state
     }
 }

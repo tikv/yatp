@@ -58,7 +58,7 @@ where
     }
 
     pub fn pop(&mut self) -> Option<Pop<T>> {
-        fn into_pop<T>(mut t: T, from_local: bool) -> Pop<T>
+        fn into_pop<T>(mut t: T, task_source: super::TaskSource) -> Pop<T>
         where
             T: TaskCell,
         {
@@ -66,18 +66,20 @@ where
             Pop {
                 task_cell: t,
                 schedule_time,
-                from_local,
+                task_source,
             }
         }
 
         if let Some(t) = self.local_queue.pop() {
-            return Some(into_pop(t, true));
+            return Some(into_pop(t, super::TaskSource::LocalQueue));
         }
         let mut need_retry = true;
         while need_retry {
             need_retry = false;
             match self.injector.steal_batch_and_pop(&self.local_queue) {
-                Steal::Success(t) => return Some(into_pop(t, false)),
+                Steal::Success(t) => {
+                    return Some(into_pop(t, super::TaskSource::GlobalQueue));
+                }
                 Steal::Retry => need_retry = true,
                 _ => {}
             }
@@ -86,7 +88,7 @@ where
                 for (idx, stealer) in self.stealers.iter().enumerate() {
                     match stealer.steal_batch_and_pop(&self.local_queue) {
                         Steal::Success(t) => {
-                            found = Some((idx, into_pop(t, false)));
+                            found = Some((idx, into_pop(t, super::TaskSource::OtherWorker)));
                             break;
                         }
                         Steal::Retry => need_retry = true,
@@ -151,7 +153,7 @@ pub fn create<T>(local_num: usize) -> (TaskInjector<T>, Vec<LocalQueue<T>>) {
 mod tests {
     use super::*;
 
-    use crate::queue::Extras;
+    use crate::queue::{Extras, TaskSource};
     use std::sync::atomic::{AtomicI32, Ordering};
     use std::thread;
     use std::time::Duration;
@@ -217,6 +219,23 @@ mod tests {
             .sum();
         assert_eq!(sum, (0..100).sum());
         assert!(locals.iter_mut().all(|c| c.pop().is_none()));
+    }
+
+    #[test]
+    fn test_task_source() {
+        let (injector, mut locals) = super::create(2);
+
+        locals[0].push(MockCell::new(1));
+        let pop = locals[0].pop().unwrap();
+        assert_eq!(pop.task_source, TaskSource::LocalQueue);
+
+        injector.push(MockCell::new(2));
+        let pop = locals[0].pop().unwrap();
+        assert_eq!(pop.task_source, TaskSource::GlobalQueue);
+
+        locals[0].push(MockCell::new(3));
+        let pop = locals[1].pop().unwrap();
+        assert_eq!(pop.task_source, TaskSource::OtherWorker);
     }
 
     #[test]
