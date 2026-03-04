@@ -1,9 +1,11 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::metrics::WORKER_ACTIVE_SECONDS;
 use crate::pool::*;
 use crate::task::callback::Handle;
 use futures_timer::Delay;
 use rand::seq::SliceRandom;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::*;
@@ -293,4 +295,29 @@ fn test_scale_down_workers() {
     assert_eq!(cases, ans);
 
     pool.shutdown();
+}
+
+#[test]
+fn test_worker_active_seconds_metric() {
+    static ID: AtomicUsize = AtomicUsize::new(0);
+    let name = format!(
+        "test_worker_active_seconds_{}",
+        ID.fetch_add(1, Ordering::SeqCst)
+    );
+    let pool = Builder::new(name.clone())
+        .max_thread_count(1)
+        .build_callback_pool();
+    let (tx, rx) = mpsc::channel();
+    pool.spawn(move |_: &mut Handle<'_>| {
+        thread::sleep(Duration::from_millis(10));
+        tx.send(()).unwrap();
+    });
+    rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    pool.shutdown();
+
+    let value = WORKER_ACTIVE_SECONDS
+        .get_metric_with_label_values(&[name.as_str()])
+        .unwrap()
+        .get();
+    assert!(value > 0.0);
 }
