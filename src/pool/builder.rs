@@ -38,6 +38,12 @@ pub struct SchedConfig {
     pub alloc_slot_backoff: Duration,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct BurstMonitorConfig {
+    pub(crate) per_worker_multiplier: usize,
+    pub(crate) min_sample_size: usize,
+}
+
 impl Default for SchedConfig {
     fn default() -> SchedConfig {
         SchedConfig {
@@ -129,6 +135,7 @@ pub struct Builder {
     name_prefix: String,
     stack_size: Option<usize>,
     sched_config: SchedConfig,
+    burst_monitoring: Option<BurstMonitorConfig>,
 }
 
 impl Builder {
@@ -138,6 +145,7 @@ impl Builder {
             name_prefix: name_prefix.into(),
             stack_size: None,
             sched_config: SchedConfig::default(),
+            burst_monitoring: None,
         }
     }
 
@@ -212,6 +220,23 @@ impl Builder {
         self
     }
 
+    /// Enables monitoring of global injector enqueue burst throughput.
+    ///
+    /// The sample size is computed as `max(min_sample_size, per_worker_multiplier * active_workers)`.
+    pub fn enable_burst_monitoring(
+        &mut self,
+        per_worker_multiplier: usize,
+        min_sample_size: usize,
+    ) -> &mut Self {
+        if per_worker_multiplier > 0 && min_sample_size > 0 {
+            self.burst_monitoring = Some(BurstMonitorConfig {
+                per_worker_multiplier,
+                min_sample_size,
+            });
+        }
+        self
+    }
+
     /// Freezes the configurations and returns the task scheduler and
     /// a builder to for lazy spawning threads.
     ///
@@ -252,7 +277,14 @@ impl Builder {
                 .store(self.sched_config.min_thread_count, Ordering::SeqCst);
         }
         let (injector, local_queues) = queue::build(queue_type, self.sched_config.max_thread_count);
-        let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));
+        let burst_monitor = self
+            .burst_monitoring
+            .map(|cfg| super::spawn::BurstMonitor::new(&self.name_prefix, cfg));
+        let core = Arc::new(QueueCore::new(
+            injector,
+            self.sched_config.clone(),
+            burst_monitor,
+        ));
 
         (
             Remote::new(core.clone()),

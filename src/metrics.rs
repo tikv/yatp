@@ -3,8 +3,11 @@
 //! Metrics of the thread pool.
 
 use lazy_static::lazy_static;
+use prometheus::core::{Collector, Desc, Metric, MetricVec, MetricVecBuilder};
 use prometheus::*;
-use std::sync::Mutex;
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 lazy_static! {
     /// Elapsed time of each level in the multilevel task queue.
@@ -71,6 +74,16 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Max enqueue throughput of the global task injector (QueueCore) since last scrape.
+    pub static ref QUEUE_CORE_BURST_THROUGHPUT: MaxGaugeVec = MaxGaugeVec::new(
+        new_opts(
+            "yatp_queue_core_burst_throughput",
+            "max enqueue throughput (tasks/sec) of the global task injector since last scrape"
+        ),
+        &["name"]
+    )
+    .unwrap();
+
     static ref NAMESPACE: Mutex<Option<String>> = Mutex::new(None);
 }
 
@@ -97,4 +110,187 @@ fn new_histogram_opts(name: &str, help: &str, buckets: Vec<f64>) -> HistogramOpt
     }
 
     opts
+}
+
+/// A gauge that tracks the maximum value since the last scrape. Note that it aims to track positive values, negative
+/// values are ignored since `max_val` is reset to 0 after each scrape.
+#[derive(Clone, Debug)]
+pub struct MaxGauge {
+    gauge: Gauge,
+    max_val: Arc<AtomicU64>,
+}
+
+impl MaxGauge {
+    /// Wraps a `Gauge` to create a `MaxGauge`. The `Gauge` should not be used directly after being wrapped, otherwise
+    /// the maximum tracking will be broken.
+    pub fn wrap(gauge: Gauge) -> Self {
+        let val = gauge.get().max(0f64);
+        Self {
+            gauge,
+            max_val: Arc::new(AtomicU64::new(val.to_bits())),
+        }
+    }
+
+    /// Observe a value, keeping the maximum since the last scrape.
+    pub fn observe(&self, v: f64) {
+        if !v.is_finite() {
+            return;
+        }
+        let mut current = self.max_val.load(Ordering::Relaxed);
+        loop {
+            if v <= f64::from_bits(current) {
+                break;
+            }
+            match self.max_val.compare_exchange_weak(
+                current,
+                v.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Get the current maximum value without resetting it.
+    pub fn get(&self) -> f64 {
+        let val = self.max_val.load(Ordering::Relaxed);
+        f64::from_bits(val)
+    }
+
+    fn take(&self) -> f64 {
+        let val = self.max_val.swap(0f64.to_bits(), Ordering::Relaxed);
+        f64::from_bits(val)
+    }
+}
+
+impl Collector for MaxGauge {
+    fn desc(&self) -> Vec<&Desc> {
+        self.gauge.desc()
+    }
+
+    fn collect(&self) -> Vec<proto::MetricFamily> {
+        let val = self.take();
+        self.gauge.set(val);
+        self.gauge.collect()
+    }
+}
+
+impl Metric for MaxGauge {
+    fn metric(&self) -> proto::Metric {
+        let val = self.take();
+        self.gauge.set(val);
+        self.gauge.metric()
+    }
+}
+
+/// Builder for `MaxGaugeVec`.
+#[derive(Clone, Debug)]
+pub struct MaxGaugeVecBuilder;
+
+impl MaxGaugeVecBuilder {
+    /// Create a new `MaxGaugeVecBuilder`.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MaxGaugeVecBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MetricVecBuilder for MaxGaugeVecBuilder {
+    type M = MaxGauge;
+    type P = Opts;
+
+    fn build(&self, opts: &Opts, vals: &[&str]) -> Result<Self::M> {
+        let mut opts = opts.clone();
+        for (name, val) in opts.variable_labels.iter().zip(vals.iter()) {
+            opts.const_labels.insert(name.clone(), (*val).to_owned());
+        }
+        opts.variable_labels.clear();
+
+        let gauge = Gauge::with_opts(opts)?;
+        Ok(MaxGauge::wrap(gauge))
+    }
+}
+
+/// A `MetricVec` for `MaxGauge` values, partitioned by label values.
+#[derive(Clone, Debug)]
+pub struct MaxGaugeVec {
+    inner: MetricVec<MaxGaugeVecBuilder>,
+}
+
+impl MaxGaugeVec {
+    /// Create a new `MaxGaugeVec` with the given label names.
+    pub fn new(opts: Opts, label_names: &[&str]) -> Result<Self> {
+        let variable_names = label_names.iter().map(|s| (*s).to_owned()).collect();
+        let opts = opts.variable_labels(variable_names);
+        let inner = MetricVec::create(proto::MetricType::GAUGE, MaxGaugeVecBuilder::new(), opts)?;
+
+        Ok(Self { inner })
+    }
+}
+
+impl std::ops::Deref for MaxGaugeVec {
+    type Target = MetricVec<MaxGaugeVecBuilder>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Collector for MaxGaugeVec {
+    fn desc(&self) -> Vec<&Desc> {
+        self.inner.desc()
+    }
+
+    fn collect(&self) -> Vec<proto::MetricFamily> {
+        self.inner.collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_max_gauge_resets_on_metric() {
+        let gauge = Gauge::with_opts(Opts::new("test_max_gauge", "test max gauge")).unwrap();
+        let max = MaxGauge::wrap(gauge);
+
+        max.observe(1.0);
+        max.observe(3.0);
+        max.observe(2.0);
+        assert_eq!(max.get(), 3.0);
+
+        let _ = max.metric();
+        assert_eq!(max.get(), 0.0);
+        assert_eq!(max.gauge.get(), 3.0);
+    }
+
+    #[test]
+    fn test_max_gauge_vec_resets_on_collect() {
+        let vec = MaxGaugeVec::new(
+            Opts::new("test_max_gauge_vec", "test max gauge vec"),
+            &["l1"],
+        )
+        .unwrap();
+        let m = vec.with_label_values(&["v1"]);
+        m.observe(5.0);
+
+        let mfs = vec.collect();
+        assert_eq!(mfs.len(), 1);
+        let mf = &mfs[0];
+        let metric = mf.get_metric().get(0).unwrap();
+        assert_eq!(metric.get_label().len(), 1);
+        assert_eq!(metric.get_label()[0].get_name(), "l1");
+        assert_eq!(metric.get_label()[0].get_value(), "v1");
+        assert_eq!(metric.get_gauge().get_value(), 5.0);
+
+        assert_eq!(m.get(), 0.0);
+    }
 }

@@ -4,14 +4,17 @@
 //! woken up when new tasks arrived and go to sleep when there are no
 //! tasks waiting to be handled.
 
+use super::builder::BurstMonitorConfig;
+use crate::metrics::{MaxGauge, QUEUE_CORE_BURST_THROUGHPUT};
 use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
 use parking_lot_core::{FilterOp, ParkResult, ParkToken, UnparkToken};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Weak,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc, OnceLock, Weak,
 };
+use std::time::Instant;
 
 /// An usize is used to trace the threads that are working actively.
 /// To save additional memory and atomic operation, the number and
@@ -26,6 +29,74 @@ const SHUTDOWN_BIT: usize = 1;
 const WORKER_COUNT_SHIFT: usize = 1;
 const WORKER_COUNT_BASE: usize = 2;
 
+fn now_ns() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
+pub(crate) struct BurstMonitor {
+    per_worker_multiplier: usize,
+    min_sample_size: usize,
+    count: AtomicUsize,
+    sample_target: AtomicUsize,
+    start_ns: AtomicU64,
+    metric: MaxGauge,
+}
+
+impl BurstMonitor {
+    pub(crate) fn new(name: &str, config: BurstMonitorConfig) -> BurstMonitor {
+        let metric = QUEUE_CORE_BURST_THROUGHPUT
+            .get_metric_with_label_values(&[name])
+            .unwrap();
+        BurstMonitor {
+            per_worker_multiplier: config.per_worker_multiplier,
+            min_sample_size: config.min_sample_size,
+            count: AtomicUsize::new(0),
+            sample_target: AtomicUsize::new(0),
+            start_ns: AtomicU64::new(0),
+            metric,
+        }
+    }
+
+    fn on_enqueue(&self, active_workers: &AtomicUsize) {
+        let new_count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+        if new_count == 1 {
+            let workers = active_workers.load(Ordering::Relaxed) >> WORKER_COUNT_SHIFT;
+            let target = self
+                .per_worker_multiplier
+                .saturating_mul(workers)
+                .max(self.min_sample_size);
+            self.sample_target.store(target, Ordering::Relaxed);
+            self.start_ns.store(now_ns(), Ordering::Relaxed);
+        }
+
+        let target = self.sample_target.load(Ordering::Relaxed);
+        if target == 0 || new_count < target {
+            return;
+        }
+
+        let start_ns = self.start_ns.load(Ordering::Relaxed);
+        if let Ok(count) = self
+            .count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                if c >= target {
+                    Some(0)
+                } else {
+                    None
+                }
+            })
+        {
+            // `count` can exceed `target` under contention; it reflects actual enqueues
+            // observed before the reset, so the measured window size is variable.
+            let elapsed_ns = now_ns().saturating_sub(start_ns);
+            if elapsed_ns > 0 {
+                let throughput = (count as f64) / (elapsed_ns as f64 / 1_000_000_000.0);
+                self.metric.observe(throughput);
+            }
+        }
+    }
+}
+
 /// Checks if shutdown bit is set.
 pub fn is_shutdown(cnt: usize) -> bool {
     cnt & SHUTDOWN_BIT == SHUTDOWN_BIT
@@ -39,14 +110,20 @@ pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     active_workers: AtomicUsize,
     config: SchedConfig,
+    burst_monitor: Option<BurstMonitor>,
 }
 
 impl<T> QueueCore<T> {
-    pub fn new(global_queue: TaskInjector<T>, config: SchedConfig) -> QueueCore<T> {
+    pub fn new(
+        global_queue: TaskInjector<T>,
+        config: SchedConfig,
+        burst_monitor: Option<BurstMonitor>,
+    ) -> QueueCore<T> {
         QueueCore {
             global_queue,
             active_workers: AtomicUsize::new(config.max_thread_count << WORKER_COUNT_SHIFT),
             config,
+            burst_monitor,
         }
     }
 
@@ -159,6 +236,9 @@ impl<T: TaskCell + Send> QueueCore<T> {
     ///
     /// `source` is used to trace who triggers the action.
     fn push(&self, source: usize, task: T) {
+        if let Some(monitor) = self.burst_monitor.as_ref() {
+            monitor.on_enqueue(&self.active_workers);
+        }
         self.global_queue.push(task);
         self.ensure_workers(source);
     }
@@ -369,7 +449,7 @@ where
 {
     let queue_type = queue_type.into();
     let (global, locals) = crate::queue::build(queue_type, config.max_thread_count);
-    let core = Arc::new(QueueCore::new(global, config));
+    let core = Arc::new(QueueCore::new(global, config, None));
     let l = locals
         .into_iter()
         .enumerate()
