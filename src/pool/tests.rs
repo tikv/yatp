@@ -300,6 +300,9 @@ fn test_scale_down_workers() {
     pool.shutdown();
 }
 
+// NOTE: This test relies on `parking_lot_core::unpark_filter` visiting waiters in FIFO order.
+// This is currently true but is an implementation detail of parking_lot_core. If the queuing
+// discipline changes, the assertions on unpark order (via `unparked_ids`) may need adjustment.
 #[test]
 fn test_ensure_workers_unparks_only_core_threads_across_two_calls() {
     // Setup:
@@ -346,6 +349,9 @@ fn test_ensure_workers_unparks_only_core_threads_across_two_calls() {
         let unparked_ids = unparked_ids.clone();
         let parked_count_clone = parked_count.clone();
 
+        // Compute expected count before spawning to avoid a race where the
+        // spawned thread increments parked_count before we read it.
+        let expected = parked_count.load(Ordering::SeqCst) + 1;
         let handle = thread::spawn(move || {
             // Signal that we're about to park.
             parked_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -359,7 +365,6 @@ fn test_ensure_workers_unparks_only_core_threads_across_two_calls() {
 
         // Wait until this thread is actually parked before parking the next one,
         // to ensure FIFO order in the parking queue.
-        let expected = parked_count.load(Ordering::SeqCst) + 1;
         while parked_count.load(Ordering::SeqCst) < expected {
             thread::yield_now();
         }
