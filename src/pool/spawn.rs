@@ -329,6 +329,11 @@ impl<T: TaskCell + Send> Local<T> {
                     if !self.core.mark_sleep() {
                         return false;
                     }
+                    // If this thread is above core_thread_count, go to sleep
+                    // without popping so scaled-down threads don't keep working.
+                    if id > self.core.config.core_thread_count.load(Ordering::SeqCst) {
+                        return true;
+                    }
                     task = self.local_queue.pop();
                     task.is_none()
                 },
