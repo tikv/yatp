@@ -73,6 +73,9 @@ impl<T> QueueCore<T> {
                     {
                         unparked_once = true;
                         FilterOp::Unpark
+                    } else if unparked_once {
+                        // We have unparked enough threads, so we can stop scanning the queue to save time.
+                        FilterOp::Stop
                     } else {
                         FilterOp::Skip
                     }
@@ -280,6 +283,11 @@ impl<T: TaskCell + Send> Local<T> {
             local_queue,
             core,
         }
+    }
+
+    /// Get the ID of the local queue.
+    pub fn id(&self) -> usize {
+        self.id
     }
 
     /// Spawns a task to the local queue.
