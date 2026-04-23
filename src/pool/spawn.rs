@@ -103,38 +103,22 @@ impl<T> QueueCore<T> {
     ///
     /// It can be marked as sleep only when the pool is not shutting down.
     pub fn mark_sleep(&self) -> bool {
-        let mut cnt = self.active_workers.load(Ordering::SeqCst);
-        loop {
-            if is_shutdown(cnt) {
-                return false;
-            }
-
-            match self.active_workers.compare_exchange_weak(
-                cnt,
-                cnt - WORKER_COUNT_BASE,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return true,
-                Err(n) => cnt = n,
-            }
+        let shutdown = is_shutdown(
+            self.active_workers
+                .fetch_sub(WORKER_COUNT_BASE, Ordering::SeqCst),
+        );
+        if shutdown {
+            // keep the right number here though it is not used anymore
+            self.active_workers
+                .fetch_add(WORKER_COUNT_BASE, Ordering::SeqCst);
         }
+        !shutdown
     }
 
     /// Marks current thread as woken up states.
     pub fn mark_woken(&self) {
-        let mut cnt = self.active_workers.load(Ordering::SeqCst);
-        loop {
-            match self.active_workers.compare_exchange_weak(
-                cnt,
-                cnt + WORKER_COUNT_BASE,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return,
-                Err(n) => cnt = n,
-            }
-        }
+        self.active_workers
+            .fetch_add(WORKER_COUNT_BASE, Ordering::SeqCst);
     }
 
     /// Scale workers.
