@@ -135,7 +135,7 @@ impl<T: TaskCell + Send + 'static> QueueCore<T> {
             Pop {
                 task_cell: t,
                 schedule_time,
-                from_local: false,
+                task_source: super::TaskSource::GlobalQueue,
             }
         }
 
@@ -316,7 +316,7 @@ mod tests {
     use crate::pool::{build_spawn, Local, Runner, RunnerBuilder};
     use crate::queue::{
         multilevel::{now, recent},
-        Extras, InjectorInner,
+        Extras, InjectorInner, TaskSource,
     };
     use rand::RngCore;
     #[derive(Debug)]
@@ -438,6 +438,15 @@ mod tests {
         run_task(95, 1);
         // after 100ms, the task should be put to level2
         run_task(1, 2);
+    }
+
+    #[test]
+    fn test_task_source() {
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, mut locals) = builder.build(1);
+        injector.push(MockTask::new(0, 1));
+        let pop = locals[0].pop().unwrap();
+        assert_eq!(pop.task_source, TaskSource::GlobalQueue);
     }
 
     #[test]

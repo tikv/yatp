@@ -108,7 +108,7 @@ where
     }
 
     pub(super) fn pop(&mut self) -> Option<Pop<T>> {
-        fn into_pop<T>(mut t: T, from_local: bool) -> Pop<T>
+        fn into_pop<T>(mut t: T, task_source: super::TaskSource) -> Pop<T>
         where
             T: TaskCell,
         {
@@ -116,12 +116,12 @@ where
             Pop {
                 task_cell: t,
                 schedule_time,
-                from_local,
+                task_source,
             }
         }
 
         if let Some(t) = self.local_queue.pop() {
-            return Some(into_pop(t, true));
+            return Some(into_pop(t, super::TaskSource::LocalQueue));
         }
         let mut rng = thread_rng();
         let mut need_retry = true;
@@ -136,7 +136,9 @@ where
                     .unwrap_or(LEVEL_NUM - 1)
             };
             match self.steal_from_injector(expected_level) {
-                Steal::Success(t) => return Some(into_pop(t, false)),
+                Steal::Success(t) => {
+                    return Some(into_pop(t, super::TaskSource::GlobalQueue));
+                }
                 Steal::Retry => need_retry = true,
                 _ => {}
             }
@@ -145,7 +147,7 @@ where
                 for (idx, stealer) in self.stealers.iter().enumerate() {
                     match stealer.steal_batch_and_pop(&self.local_queue) {
                         Steal::Success(t) => {
-                            found = Some((idx, into_pop(t, false)));
+                            found = Some((idx, into_pop(t, super::TaskSource::OtherWorker)));
                             break;
                         }
                         Steal::Retry => need_retry = true,
@@ -160,7 +162,9 @@ where
             }
             for l in expected_level + 1..expected_level + LEVEL_NUM {
                 match self.steal_from_injector(l % LEVEL_NUM) {
-                    Steal::Success(t) => return Some(into_pop(t, false)),
+                    Steal::Success(t) => {
+                        return Some(into_pop(t, super::TaskSource::GlobalQueue));
+                    }
                     Steal::Retry => need_retry = true,
                     _ => {}
                 }
@@ -920,7 +924,7 @@ pub(super) fn recent() -> Instant {
 mod tests {
     use super::*;
     use crate::pool::build_spawn;
-    use crate::queue::Extras;
+    use crate::queue::{Extras, TaskSource};
 
     use std::sync::atomic::AtomicU64;
     use std::sync::mpsc;
@@ -1025,6 +1029,24 @@ mod tests {
         thread::sleep(SLEEP_DUR);
         let schedule_time = locals[0].pop().unwrap().schedule_time;
         assert!(schedule_time.elapsed() >= SLEEP_DUR);
+    }
+
+    #[test]
+    fn test_task_source() {
+        let builder = Builder::new(Config::default());
+        let (injector, mut locals) = builder.build(2);
+
+        locals[0].push(MockTask::new(0, Extras::multilevel_default()));
+        let pop = locals[0].pop().unwrap();
+        assert_eq!(pop.task_source, TaskSource::LocalQueue);
+
+        injector.push(MockTask::new(0, Extras::multilevel_default()));
+        let pop = locals[0].pop().unwrap();
+        assert_eq!(pop.task_source, TaskSource::GlobalQueue);
+
+        locals[0].push(MockTask::new(0, Extras::multilevel_default()));
+        let pop = locals[1].pop().unwrap();
+        assert_eq!(pop.task_source, TaskSource::OtherWorker);
     }
 
     #[test]
