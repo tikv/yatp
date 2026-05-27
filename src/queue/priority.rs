@@ -661,6 +661,51 @@ mod tests {
     }
 
     #[test]
+    fn test_pop_empty_queue() {
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build_raw::<MockTask>(1);
+        assert!(injector.queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_equal_priority_fifo_ordering() {
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build_raw::<MockTask>(1);
+
+        // All tasks share the same priority; they must come out in FIFO order
+        // because the sequence counter in MapKey breaks ties monotonically.
+        injector.push(MockTask::new(1, 42));
+        injector.push(MockTask::new(2, 42));
+        injector.push(MockTask::new(3, 42));
+
+        let t1 = injector.queue.pop().unwrap().task_cell;
+        let t2 = injector.queue.pop().unwrap().task_cell;
+        let t3 = injector.queue.pop().unwrap().task_cell;
+        assert_eq!(t1.sleep_ms, 1);
+        assert_eq!(t2.sleep_ms, 2);
+        assert_eq!(t3.sleep_ms, 3);
+        assert!(injector.queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_u64_max_priority_boundary() {
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build_raw::<MockTask>(1);
+
+        injector.push(MockTask::new(0, u64::MAX));
+        injector.push(MockTask::new(0, 0));
+        injector.push(MockTask::new(0, u64::MAX - 1));
+
+        let mut t1 = injector.queue.pop().unwrap().task_cell;
+        let mut t2 = injector.queue.pop().unwrap().task_cell;
+        let mut t3 = injector.queue.pop().unwrap().task_cell;
+        assert_eq!(t1.mut_extras().task_id(), 0);
+        assert_eq!(t2.mut_extras().task_id(), u64::MAX - 1);
+        assert_eq!(t3.mut_extras().task_id(), u64::MAX);
+        assert!(injector.queue.pop().is_none());
+    }
+
+    #[test]
     fn test_metrics() {
         let name = "test_priority_metrics";
         let builder = Builder::new(
