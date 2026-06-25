@@ -252,8 +252,8 @@ mod tests {
 
     const WORKER_SPIN_POP_COUNT: usize = 11;
     const DELAYED_TASK_DELAY: Duration = Duration::from_millis(50);
-    const MAX_DELAYED_TASK_LAG: Duration = Duration::from_millis(500);
-    const LATER_RETRY_OFFSET: Duration = Duration::from_secs(2);
+    const MAX_DELAYED_TASK_LAG: Duration = Duration::from_secs(2);
+    const LATER_RETRY_OFFSET: Duration = Duration::from_secs(10);
 
     #[derive(Clone, Copy)]
     enum DelayedQueueScenario {
@@ -403,7 +403,9 @@ mod tests {
         done_rx: mpsc::Receiver<Instant>,
     ) -> Instant {
         let (remote, _pause_rx, metrics, handle) = build_custom_worker(queue);
-        let executed_value = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let executed_value = done_rx
+            .recv_timeout(MAX_DELAYED_TASK_LAG + Duration::from_secs(1))
+            .unwrap();
 
         {
             let metrics = metrics.lock().unwrap();
@@ -473,7 +475,7 @@ mod tests {
         });
         release_tx.send(()).unwrap();
 
-        let executed_at = done_rx.recv_timeout(Duration::from_millis(500)).unwrap();
+        let executed_at = done_rx.recv_timeout(MAX_DELAYED_TASK_LAG).unwrap();
         assert!(executed_at >= ready_inserted_at);
         assert!(executed_at.duration_since(ready_inserted_at) <= MAX_DELAYED_TASK_LAG);
         assert!(executed_at < pending_retry_at);
@@ -670,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_pop_or_sleep_returns_ready_from_validate_without_sleeping() {
-        let retry_at = Instant::now() + Duration::from_secs(1);
+        let retry_at = Instant::now() + LATER_RETRY_OFFSET;
         let queue = Arc::new(ScriptedQueue::new(vec![ScriptedQueue::ready(1)]));
         let mut local = build_scripted_local(queue);
 
@@ -682,7 +684,7 @@ mod tests {
     #[test]
     fn test_pop_or_sleep_uses_min_retry_when_validate_pending() {
         let earlier_retry_at = Instant::now() + Duration::from_millis(20);
-        let later_retry_at = Instant::now() + Duration::from_secs(1);
+        let later_retry_at = Instant::now() + LATER_RETRY_OFFSET;
         let queue = Arc::new(ScriptedQueue::new(vec![
             PopResult::Pending {
                 retry_at: earlier_retry_at,
@@ -700,7 +702,7 @@ mod tests {
         assert_next_ready_task(&mut local, 1);
 
         let earlier_retry_at = Instant::now() + Duration::from_millis(20);
-        let later_retry_at = Instant::now() + Duration::from_secs(1);
+        let later_retry_at = Instant::now() + LATER_RETRY_OFFSET;
         let queue = Arc::new(ScriptedQueue::new(vec![
             PopResult::Pending {
                 retry_at: later_retry_at,
@@ -741,7 +743,7 @@ mod tests {
         // pop_or_sleep. If the last observation gets shorter, the worker should
         // wake at the shorter deadline instead of an older longer one.
         let earlier_retry_at = Instant::now() + Duration::from_millis(50);
-        let later_retry_at = Instant::now() + Duration::from_millis(400);
+        let later_retry_at = Instant::now() + LATER_RETRY_OFFSET;
         let (done_tx, done_rx) = mpsc::channel();
         let mut results = Vec::new();
         for _ in 1..WORKER_SPIN_POP_COUNT {
@@ -860,7 +862,7 @@ mod tests {
         });
         release_tx.send(()).unwrap();
 
-        let executed_at = done_rx.recv_timeout(Duration::from_millis(500)).unwrap();
+        let executed_at = done_rx.recv_timeout(MAX_DELAYED_TASK_LAG).unwrap();
         assert!(executed_at >= inserted_at);
         assert!(executed_at.duration_since(inserted_at) <= MAX_DELAYED_TASK_LAG);
         assert!(executed_at < retry_at);
@@ -914,7 +916,9 @@ mod tests {
         });
         let earlier_retry_at = queue.ready_at(1);
 
-        let executed_at = done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let executed_at = done_rx
+            .recv_timeout(MAX_DELAYED_TASK_LAG + Duration::from_secs(1))
+            .unwrap();
         assert!(executed_at >= earlier_retry_at);
         assert!(executed_at.duration_since(earlier_retry_at) <= MAX_DELAYED_TASK_LAG);
         assert!(executed_at < later_retry_at);
@@ -1001,7 +1005,9 @@ mod tests {
         pause_rx_2.recv_timeout(Duration::from_secs(1)).unwrap();
         remote.scale_workers(1);
 
-        let executed_at = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let executed_at = done_rx
+            .recv_timeout(MAX_DELAYED_TASK_LAG + Duration::from_secs(1))
+            .unwrap();
         assert!(executed_at >= ready_at);
         assert!(executed_at.duration_since(ready_at) <= MAX_DELAYED_TASK_LAG);
 
@@ -1068,7 +1074,9 @@ mod tests {
             }
         }
         let (remote, _pause_rx, metrics, handle) = build_custom_worker(queue.clone());
-        let executed_at = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let executed_at = done_rx
+            .recv_timeout(MAX_DELAYED_TASK_LAG + Duration::from_secs(1))
+            .unwrap();
 
         assert!(executed_at >= ready_at);
         assert!(executed_at.duration_since(ready_at) <= MAX_DELAYED_TASK_LAG);

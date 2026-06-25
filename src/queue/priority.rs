@@ -663,6 +663,29 @@ mod tests {
     #[test]
     fn test_metrics() {
         let name = "test_priority_metrics";
+        let level0_elapsed = MULTILEVEL_LEVEL_ELAPSED
+            .get_metric_with_label_values(&[name, "0"])
+            .unwrap();
+        let wait_duration = TASK_WAIT_DURATION
+            .get_metric_with_label_values(&[name])
+            .unwrap();
+        let exec_duration = TASK_EXEC_DURATION
+            .get_metric_with_label_values(&[name])
+            .unwrap();
+        let poll_duration = TASK_POLL_DURATION
+            .get_metric_with_label_values(&[name, "0"])
+            .unwrap();
+        let exec_times = TASK_EXEC_TIMES
+            .get_metric_with_label_values(&[name])
+            .unwrap();
+        let level0_elapsed_before = level0_elapsed.get();
+        let wait_count_before = wait_duration.get_sample_count();
+        let exec_duration_count_before = exec_duration.get_sample_count();
+        let exec_duration_sum_before = exec_duration.get_sample_sum();
+        let poll_duration_count_before = poll_duration.get_sample_count();
+        let poll_duration_sum_before = poll_duration.get_sample_sum();
+        let exec_times_count_before = exec_times.get_sample_count();
+        let exec_times_sum_before = exec_times.get_sample_sum();
         let builder = Builder::new(
             Config::default().name(Some(name)),
             Arc::new(OrderByIdProvider),
@@ -680,61 +703,19 @@ mod tests {
 
         // Explicitly flush local metrics so the assertions do not depend on
         // whether the elapsed-time threshold was crossed before the last task.
-        assert!(
-            MULTILEVEL_LEVEL_ELAPSED
-                .get_metric_with_label_values(&[name, "0"])
-                .unwrap()
-                .get()
-                > 100_000
-        );
+        assert!(level0_elapsed.get() - level0_elapsed_before > 100_000);
+        assert_eq!(wait_duration.get_sample_count() - wait_count_before, 4);
         assert_eq!(
-            TASK_WAIT_DURATION
-                .get_metric_with_label_values(&[name])
-                .unwrap()
-                .get_sample_count(),
+            exec_duration.get_sample_count() - exec_duration_count_before,
             4
         );
+        assert!(exec_duration.get_sample_sum() - exec_duration_sum_before >= 0.1);
         assert_eq!(
-            TASK_EXEC_DURATION
-                .get_metric_with_label_values(&[name])
-                .unwrap()
-                .get_sample_count(),
+            poll_duration.get_sample_count() - poll_duration_count_before,
             4
         );
-        assert!(
-            TASK_EXEC_DURATION
-                .get_metric_with_label_values(&[name])
-                .unwrap()
-                .get_sample_sum()
-                >= 0.1
-        );
-        assert_eq!(
-            TASK_POLL_DURATION
-                .get_metric_with_label_values(&[name, "0"])
-                .unwrap()
-                .get_sample_count(),
-            4
-        );
-        assert!(
-            TASK_POLL_DURATION
-                .get_metric_with_label_values(&[name, "0"])
-                .unwrap()
-                .get_sample_sum()
-                >= 0.1
-        );
-        assert_eq!(
-            TASK_EXEC_TIMES
-                .get_metric_with_label_values(&[name])
-                .unwrap()
-                .get_sample_count(),
-            4
-        );
-        assert!(
-            TASK_EXEC_TIMES
-                .get_metric_with_label_values(&[name])
-                .unwrap()
-                .get_sample_sum()
-                >= 3.0
-        );
+        assert!(poll_duration.get_sample_sum() - poll_duration_sum_before >= 0.1);
+        assert_eq!(exec_times.get_sample_count() - exec_times_count_before, 4);
+        assert!(exec_times.get_sample_sum() - exec_times_sum_before >= 3.0);
     }
 }
