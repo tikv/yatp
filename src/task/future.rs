@@ -369,8 +369,15 @@ impl Runner {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum RescheduleAction {
+    None,
+    Reschedule,
+    YieldToScheduler,
+}
+
 thread_local! {
-    static NEED_RESCHEDULE: Cell<bool> = const { Cell::new(false) };
+    static RESCHEDULE_ACTION: Cell<RescheduleAction> = const { Cell::new(RescheduleAction::None) };
 }
 
 impl crate::pool::Runner for Runner {
@@ -403,11 +410,19 @@ impl crate::pool::Runner for Runner {
                 {
                     Ok(_) => return false,
                     Err(NOTIFIED) => {
-                        let need_reschedule = NEED_RESCHEDULE.with(|r| r.replace(false));
-                        if (repoll_times >= self.repoll_limit || need_reschedule)
+                        let action = RESCHEDULE_ACTION.with(|r| r.replace(RescheduleAction::None));
+                        if action == RescheduleAction::YieldToScheduler {
+                            wake_task(Cow::Owned(task_cell), true);
+                            return false;
+                        }
+                        if (repoll_times >= self.repoll_limit
+                            || action == RescheduleAction::Reschedule)
                             && scope.0.need_preempt()
                         {
-                            wake_task(Cow::Owned(task_cell), need_reschedule);
+                            wake_task(
+                                Cow::Owned(task_cell),
+                                action == RescheduleAction::Reschedule,
+                            );
                             return false;
                         } else {
                             repoll_times += 1;
@@ -424,11 +439,30 @@ impl crate::pool::Runner for Runner {
 ///
 /// It is only guaranteed to work in yatp.
 pub async fn reschedule() {
-    Reschedule { first_poll: true }.await
+    Reschedule {
+        first_poll: true,
+        action: RescheduleAction::Reschedule,
+    }
+    .await
+}
+
+/// Gives up a time slice and returns the task to the scheduler.
+///
+/// Unlike [`reschedule`], this always queues the current task before polling it
+/// again, even when there are no other ready tasks that need to preempt it.
+///
+/// It is only guaranteed to work in yatp.
+pub async fn yield_to_scheduler() {
+    Reschedule {
+        first_poll: true,
+        action: RescheduleAction::YieldToScheduler,
+    }
+    .await
 }
 
 struct Reschedule {
     first_poll: bool,
+    action: RescheduleAction,
 }
 
 impl Future for Reschedule {
@@ -437,8 +471,8 @@ impl Future for Reschedule {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         if self.first_poll {
             self.first_poll = false;
-            NEED_RESCHEDULE.with(|r| {
-                r.set(true);
+            RESCHEDULE_ACTION.with(|r| {
+                r.set(self.action);
             });
             cx.waker().wake_by_ref();
             Poll::Pending
@@ -452,11 +486,18 @@ impl Future for Reschedule {
 mod tests {
     use super::*;
     use crate::pool::{build_spawn, Builder, Remote, Runner as _};
-    use crate::queue::{PopResult, QueueType};
+    use crate::queue::{CustomBuilder, CustomConfig, Pop, PopResult, QueueType, TaskQueue};
 
-    use std::sync::mpsc;
+    use std::collections::VecDeque;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc, Mutex,
+    };
     use std::{cell::RefCell, thread};
-    use std::{rc::Rc, time::Duration};
+    use std::{
+        rc::Rc,
+        time::{Duration, Instant},
+    };
 
     struct MockLocal {
         runner: Rc<RefCell<Runner>>,
@@ -466,7 +507,11 @@ mod tests {
 
     impl MockLocal {
         fn new(runner: Runner) -> MockLocal {
-            let (remote, locals) = build_spawn(QueueType::SingleLevel, Default::default());
+            MockLocal::with_queue(runner, QueueType::SingleLevel)
+        }
+
+        fn with_queue(runner: Runner, queue_type: QueueType<TaskCell>) -> MockLocal {
+            let (remote, locals) = build_spawn(queue_type, Default::default());
             MockLocal {
                 runner: Rc::new(RefCell::new(runner)),
                 remote,
@@ -480,6 +525,42 @@ mod tests {
                 let runner = self.runner.clone();
                 runner.borrow_mut().handle(&mut self.locals[0], t.task_cell);
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct NoReadyHintQueue {
+        tasks: Mutex<VecDeque<TaskCell>>,
+        has_ready_task_calls: AtomicUsize,
+    }
+
+    impl TaskQueue<TaskCell> for NoReadyHintQueue {
+        fn push(&self, task_cell: TaskCell) {
+            self.tasks.lock().unwrap().push_back(task_cell);
+        }
+
+        fn pop(&self) -> PopResult<TaskCell> {
+            self.tasks
+                .lock()
+                .unwrap()
+                .pop_front()
+                .map(|task_cell| {
+                    PopResult::Ready(Pop {
+                        task_cell,
+                        schedule_time: Instant::now(),
+                        from_local: false,
+                    })
+                })
+                .unwrap_or(PopResult::Empty)
+        }
+
+        fn drain(&self) {
+            self.tasks.lock().unwrap().clear();
+        }
+
+        fn has_ready_task(&self) -> bool {
+            self.has_ready_task_calls.fetch_add(1, Ordering::SeqCst);
+            false
         }
     }
 
@@ -673,6 +754,28 @@ mod tests {
         local.handle_once();
         assert_eq!(res_rx.recv().unwrap(), 2);
         assert_eq!(res_rx.recv().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_yield_to_scheduler() {
+        let queue = Arc::new(NoReadyHintQueue::default());
+        let queue_builder = CustomBuilder::new(CustomConfig::default(), queue.clone());
+        let mut local = MockLocal::with_queue(Default::default(), queue_builder.into());
+        let (res_tx, res_rx) = mpsc::channel();
+
+        let fut = async move {
+            res_tx.send(1).unwrap();
+            yield_to_scheduler().await;
+            res_tx.send(2).unwrap();
+        };
+        local.remote.spawn(fut);
+
+        local.handle_once();
+        assert_eq!(res_rx.recv().unwrap(), 1);
+        assert!(res_rx.try_recv().is_err());
+        assert_eq!(queue.has_ready_task_calls.load(Ordering::SeqCst), 0);
+        local.handle_once();
+        assert_eq!(res_rx.recv().unwrap(), 2);
     }
 
     #[cfg_attr(not(feature = "failpoints"), ignore)]
