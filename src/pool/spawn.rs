@@ -7,7 +7,7 @@
 use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, PopResult, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
-use parking_lot_core::{FilterOp, ParkToken, UnparkToken};
+use parking_lot_core::{FilterOp, ParkResult, ParkToken, UnparkToken};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Weak,
@@ -63,6 +63,10 @@ impl<T> QueueCore<T> {
             return;
         }
 
+        self.wake_one_core_worker(source);
+    }
+
+    fn wake_one_core_worker(&self, source: usize) {
         let addr = self as *const QueueCore<T> as usize;
         let mut unparked_once = false;
 
@@ -314,6 +318,10 @@ impl<T: TaskCell + Send> Local<T> {
         self.local_queue.pop()
     }
 
+    pub(crate) fn is_scaled_down_worker(&self) -> bool {
+        self.id > self.core.config.core_thread_count.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn drain(&mut self) {
         self.local_queue.drain();
     }
@@ -327,13 +335,13 @@ impl<T: TaskCell + Send> Local<T> {
         let id = self.id;
         let mut timeout = initial_retry_at;
 
-        loop {
+        while !self.core.is_shutdown() {
             let mut task = None;
             let mut next_timeout = None;
             let mut marked_sleep = false;
 
             fail_point!("worker-pop-or-sleep-before-park");
-            unsafe {
+            let park_result = unsafe {
                 parking_lot_core::park(
                     address,
                     || {
@@ -388,6 +396,10 @@ impl<T: TaskCell + Send> Local<T> {
                 self.core.mark_woken();
             }
 
+            if self.core.is_shutdown() {
+                return None;
+            }
+
             // If validate found a ready task, the park was aborted before the
             // thread actually slept. Return it immediately.
             if task.is_some() {
@@ -402,11 +414,22 @@ impl<T: TaskCell + Send> Local<T> {
                 continue;
             }
 
+            if matches!(park_result, ParkResult::TimedOut) && self.is_scaled_down_worker() {
+                // This worker carried the pending retry timeout, but it is no
+                // longer allowed to pop tasks after scale-down. Wake a core
+                // worker to re-check the queue and install its own timeout (or
+                // run ready work), then park this worker without a deadline.
+                self.core.wake_one_core_worker(id);
+                timeout = None;
+                continue;
+            }
+
             // Otherwise the thread was either unparked, timed out, or the park
             // was aborted without a task, for example because shutdown made
             // mark_sleep fail. Let the worker loop re-check the pool state.
             return None;
         }
+        None
     }
 
     /// Returns whether there are preemptive tasks to run.

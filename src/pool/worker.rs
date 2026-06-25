@@ -222,6 +222,15 @@ mod tests {
         }
     }
 
+    fn two_thread_config() -> SchedConfig {
+        SchedConfig {
+            min_thread_count: 1,
+            max_thread_count: 2,
+            core_thread_count: AtomicUsize::new(2),
+            ..Default::default()
+        }
+    }
+
     fn build_scripted_local(queue: Arc<ScriptedQueue<TestTask>>) -> Local<TestTask> {
         let queue_builder = CustomBuilder::new(CustomConfig::default(), queue);
         let (_, mut locals) = build_spawn(queue_builder, one_thread_config());
@@ -272,6 +281,26 @@ mod tests {
 
     struct DeadlineQueue<T> {
         state: Mutex<DeadlineQueueState<T>>,
+    }
+
+    struct AlwaysPendingQueue {
+        retry_at: Instant,
+    }
+
+    impl TaskQueue<callback::TaskCell> for AlwaysPendingQueue {
+        fn push(&self, _: callback::TaskCell) {}
+
+        fn pop(&self) -> PopResult<callback::TaskCell> {
+            PopResult::Pending {
+                retry_at: self.retry_at,
+            }
+        }
+
+        fn drain(&self) {}
+
+        fn has_ready_task(&self) -> bool {
+            false
+        }
     }
 
     impl<T> DeadlineQueue<T> {
@@ -399,6 +428,16 @@ mod tests {
         Arc<Mutex<Metrics>>,
         JoinHandle<()>,
     ) {
+        let queue_builder = CustomBuilder::new(CustomConfig::default(), queue);
+        let (remote, mut locals) = build_spawn(queue_builder, one_thread_config());
+        let (pause_rx, metrics, handle) = start_custom_worker(locals.remove(0));
+
+        (remote, pause_rx, metrics, handle)
+    }
+
+    fn start_custom_worker(
+        local: Local<callback::TaskCell>,
+    ) -> (mpsc::Receiver<()>, Arc<Mutex<Metrics>>, JoinHandle<()>) {
         let (pause_tx, pause_rx) = mpsc::channel();
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let runner = Runner {
@@ -406,12 +445,10 @@ mod tests {
             metrics: metrics.clone(),
             tx: pause_tx,
         };
-        let queue_builder = CustomBuilder::new(CustomConfig::default(), queue);
-        let (remote, mut locals) = build_spawn(queue_builder, one_thread_config());
-        let worker = WorkerThread::new(locals.remove(0), runner);
+        let worker = WorkerThread::new(local, runner);
         let handle = thread::spawn(move || worker.run());
 
-        (remote, pause_rx, metrics, handle)
+        (pause_rx, metrics, handle)
     }
 
     fn check_worker_runs_ready_task_inserted_while_pending() {
@@ -475,6 +512,30 @@ mod tests {
                 if let Some(release_rx) = release_rx.take() {
                     let _ = release_rx.recv_timeout(Duration::from_secs(3));
                 }
+            }
+        })
+        .unwrap();
+
+        (entered_rx, release_tx)
+    }
+
+    fn configure_counting_failpoint(
+        name: &'static str,
+        blocked_count: usize,
+    ) -> (mpsc::Receiver<usize>, mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let count = Arc::new(AtomicUsize::new(0));
+
+        fail::cfg_callback(name, move || {
+            let current = count.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = entered_tx.send(current);
+            if current <= blocked_count {
+                let _ = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(3));
             }
         })
         .unwrap();
@@ -865,6 +926,94 @@ mod tests {
         assert_eq!(metrics.start, 1);
         assert_eq!(metrics.handle, 1);
         assert_eq!(metrics.end, 1);
+    }
+
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
+    #[test]
+    fn test_scaled_down_worker_reparks_after_pending_timeout() {
+        // A worker that becomes above core_thread_count while carrying a
+        // Pending timeout should not return to the outer spin-pop path when
+        // the timeout fires. It should clear the timeout and park again.
+        let _lock = lock_failpoint_tests();
+        let _guard = fail::FailScenario::setup();
+        let (sleep_rx, release_tx) =
+            configure_counting_failpoint("worker-pop-or-sleep-before-sleep", 2);
+        let queue = Arc::new(AlwaysPendingQueue {
+            retry_at: Instant::now() + Duration::from_millis(20),
+        });
+        let queue_builder = CustomBuilder::new(CustomConfig::default(), queue);
+        let (remote, mut locals) = build_spawn(queue_builder, two_thread_config());
+        let (pause_rx, metrics, handle) = start_custom_worker(locals.remove(1));
+
+        pause_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(sleep_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        remote.scale_workers(1);
+        release_tx.send(()).unwrap();
+
+        assert_eq!(sleep_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 2);
+        {
+            let metrics = metrics.lock().unwrap();
+            assert_eq!(metrics.pause, 1);
+            assert_eq!(metrics.resume, 0);
+        }
+        release_tx.send(()).unwrap();
+        thread::sleep(Duration::from_millis(20));
+
+        remote.stop();
+        handle.join().unwrap();
+        let metrics = metrics.lock().unwrap();
+        assert_eq!(metrics.start, 1);
+        assert_eq!(metrics.handle, 0);
+        assert_eq!(metrics.pause, 1);
+        assert_eq!(metrics.resume, 1);
+        assert_eq!(metrics.end, 1);
+    }
+
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
+    #[test]
+    fn test_scaled_down_pending_timeout_wakes_core_worker() {
+        // Worker 1 parks on an empty queue without a timeout. A delayed task is
+        // then inserted directly into the custom queue so no push wakeup is
+        // sent. Worker 2 observes the Pending timeout, gets scaled down, and
+        // must wake worker 1 when the timeout fires.
+        let _lock = lock_failpoint_tests();
+        let _guard = fail::FailScenario::setup();
+        let (sleep_rx, _) = configure_counting_failpoint("worker-pop-or-sleep-before-sleep", 0);
+        let queue = Arc::new(DeadlineQueue::new(vec![Duration::from_millis(100)]));
+        let queue_builder = CustomBuilder::new(CustomConfig::default(), queue.clone());
+        let (remote, mut locals) = build_spawn(queue_builder, two_thread_config());
+        let local_2 = locals.remove(1);
+        let local_1 = locals.remove(0);
+        let (pause_rx_1, metrics_1, handle_1) = start_custom_worker(local_1);
+
+        pause_rx_1.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(sleep_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        fail::remove("worker-pop-or-sleep-before-sleep");
+        thread::sleep(Duration::from_millis(20));
+
+        let (done_tx, done_rx) = mpsc::channel();
+        queue.push(callback_task(move |_: &mut callback::Handle<'_>| {
+            done_tx.send(Instant::now()).unwrap();
+        }));
+        let ready_at = queue.ready_at(0);
+        let (pause_rx_2, metrics_2, handle_2) = start_custom_worker(local_2);
+
+        pause_rx_2.recv_timeout(Duration::from_secs(1)).unwrap();
+        remote.scale_workers(1);
+
+        let executed_at = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(executed_at >= ready_at);
+        assert!(executed_at.duration_since(ready_at) <= MAX_DELAYED_TASK_LAG);
+
+        remote.stop();
+        handle_1.join().unwrap();
+        handle_2.join().unwrap();
+        let metrics_1 = metrics_1.lock().unwrap();
+        let metrics_2 = metrics_2.lock().unwrap();
+        assert_eq!(metrics_1.handle, 1);
+        assert_eq!(metrics_1.end, 1);
+        assert_eq!(metrics_2.handle, 0);
+        assert_eq!(metrics_2.end, 1);
     }
 
     #[cfg_attr(not(feature = "failpoints"), ignore)]
