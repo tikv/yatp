@@ -44,6 +44,10 @@ pub trait TaskQueue<T>: Send + Sync + 'static {
     /// This is used by shutdown paths to drop remaining tasks. Unlike
     /// [`TaskQueue::pop`], it should not leave delayed or throttled tasks in
     /// the queue just because they are not ready to run.
+    ///
+    /// A custom queue is shared by all worker-local handles, so shutdown may
+    /// call this method multiple times or concurrently. Implementations must be
+    /// idempotent and thread-safe.
     fn drain(&self);
 
     /// Returns whether the queue may have a ready task.
@@ -531,10 +535,10 @@ mod tests {
         while let PopResult::Ready(Pop { task_cell, .. }) = locals[0].pop() {
             assert!(runner.handle(&mut locals[0], task_cell));
         }
+        runner.flush();
 
-        // Four tasks are spawned, but metrics are flushed after the local
-        // execution counter crosses the flush threshold. Check the flushed
-        // samples instead of requiring every task to be visible immediately.
+        // Explicitly flush local metrics so the assertions do not depend on
+        // whether the elapsed-time threshold was crossed before the last task.
         assert!(
             MULTILEVEL_LEVEL_ELAPSED
                 .get_metric_with_label_values(&[name, "0"])
@@ -549,19 +553,19 @@ mod tests {
                 .get()
                 > 100_000
         );
-        assert!(
+        assert_eq!(
             TASK_WAIT_DURATION
                 .get_metric_with_label_values(&[name])
                 .unwrap()
-                .get_sample_count()
-                >= 3
+                .get_sample_count(),
+            4
         );
-        assert!(
+        assert_eq!(
             TASK_EXEC_DURATION
                 .get_metric_with_label_values(&[name])
                 .unwrap()
-                .get_sample_count()
-                >= 3
+                .get_sample_count(),
+            4
         );
         assert!(
             TASK_EXEC_DURATION
@@ -570,12 +574,12 @@ mod tests {
                 .get_sample_sum()
                 >= 0.1
         );
-        assert!(
+        assert_eq!(
             TASK_POLL_DURATION
                 .get_metric_with_label_values(&[name, "0"])
                 .unwrap()
-                .get_sample_count()
-                >= 3
+                .get_sample_count(),
+            4
         );
         assert!(
             TASK_POLL_DURATION
@@ -584,12 +588,12 @@ mod tests {
                 .get_sample_sum()
                 >= 0.1
         );
-        assert!(
+        assert_eq!(
             TASK_EXEC_TIMES
                 .get_metric_with_label_values(&[name])
                 .unwrap()
-                .get_sample_count()
-                >= 3
+                .get_sample_count(),
+            4
         );
         assert!(
             TASK_EXEC_TIMES

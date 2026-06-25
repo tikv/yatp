@@ -676,8 +676,10 @@ mod tests {
         while let PopResult::Ready(Pop { task_cell, .. }) = locals[0].pop() {
             assert!(runner.handle(&mut locals[0], task_cell));
         }
+        runner.flush();
 
-        // we spawn 4 tasks here but the metrics of the last one is not flush, so only check the first 3 here.
+        // Explicitly flush local metrics so the assertions do not depend on
+        // whether the elapsed-time threshold was crossed before the last task.
         assert!(
             MULTILEVEL_LEVEL_ELAPSED
                 .get_metric_with_label_values(&[name, "0"])
@@ -685,19 +687,19 @@ mod tests {
                 .get()
                 > 100_000
         );
-        assert!(
+        assert_eq!(
             TASK_WAIT_DURATION
                 .get_metric_with_label_values(&[name])
                 .unwrap()
-                .get_sample_count()
-                >= 3
+                .get_sample_count(),
+            4
         );
-        assert!(
+        assert_eq!(
             TASK_EXEC_DURATION
                 .get_metric_with_label_values(&[name])
                 .unwrap()
-                .get_sample_count()
-                >= 3
+                .get_sample_count(),
+            4
         );
         assert!(
             TASK_EXEC_DURATION
@@ -706,12 +708,12 @@ mod tests {
                 .get_sample_sum()
                 >= 0.1
         );
-        assert!(
+        assert_eq!(
             TASK_POLL_DURATION
                 .get_metric_with_label_values(&[name, "0"])
                 .unwrap()
-                .get_sample_count()
-                >= 3
+                .get_sample_count(),
+            4
         );
         assert!(
             TASK_POLL_DURATION
@@ -720,12 +722,12 @@ mod tests {
                 .get_sample_sum()
                 >= 0.1
         );
-        assert!(
+        assert_eq!(
             TASK_EXEC_TIMES
                 .get_metric_with_label_values(&[name])
                 .unwrap()
-                .get_sample_count()
-                >= 3
+                .get_sample_count(),
+            4
         );
         assert!(
             TASK_EXEC_TIMES

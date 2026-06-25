@@ -144,6 +144,7 @@ mod tests {
     struct ScriptedQueue<T> {
         scripted_results: Mutex<VecDeque<PopResult<T>>>,
         pushed_tasks: Mutex<VecDeque<T>>,
+        push_tx: Mutex<Option<mpsc::Sender<()>>>,
     }
 
     impl<T> ScriptedQueue<T> {
@@ -151,6 +152,18 @@ mod tests {
             ScriptedQueue {
                 scripted_results: Mutex::new(scripted_results.into()),
                 pushed_tasks: Mutex::new(VecDeque::new()),
+                push_tx: Mutex::new(None),
+            }
+        }
+
+        fn with_push_signal(
+            scripted_results: Vec<PopResult<T>>,
+            push_tx: mpsc::Sender<()>,
+        ) -> ScriptedQueue<T> {
+            ScriptedQueue {
+                scripted_results: Mutex::new(scripted_results.into()),
+                pushed_tasks: Mutex::new(VecDeque::new()),
+                push_tx: Mutex::new(Some(push_tx)),
             }
         }
     }
@@ -168,6 +181,9 @@ mod tests {
     impl<T: Send + 'static> TaskQueue<T> for ScriptedQueue<T> {
         fn push(&self, task_cell: T) {
             self.pushed_tasks.lock().unwrap().push_back(task_cell);
+            if let Some(push_tx) = self.push_tx.lock().unwrap().as_ref() {
+                let _ = push_tx.send(());
+            }
         }
 
         fn pop(&self) -> PopResult<T> {
@@ -237,114 +253,109 @@ mod tests {
         EarlierRetryInValidate,
     }
 
-    enum DelayedPop {
+    enum DeadlineScript {
         Empty,
         Pending(Instant),
     }
 
-    struct DelayedQueueState<T> {
-        task: Option<T>,
-        ready_at: Option<Instant>,
-        scripted_results: VecDeque<DelayedPop>,
+    struct DeadlineTask<T> {
+        task_cell: T,
+        ready_at: Instant,
     }
 
-    struct DelayedQueue<T> {
-        scenario: DelayedQueueScenario,
-        delay: Duration,
-        state: Mutex<DelayedQueueState<T>>,
+    struct DeadlineQueueState<T> {
+        delays: VecDeque<Duration>,
+        ready_ats: Vec<Instant>,
+        scripted_results: VecDeque<DeadlineScript>,
+        tasks: VecDeque<DeadlineTask<T>>,
     }
 
-    impl<T> DelayedQueue<T> {
-        fn new(scenario: DelayedQueueScenario) -> DelayedQueue<T> {
-            DelayedQueue {
-                scenario,
-                delay: DELAYED_TASK_DELAY,
-                state: Mutex::new(DelayedQueueState {
-                    task: None,
-                    ready_at: None,
+    struct DeadlineQueue<T> {
+        state: Mutex<DeadlineQueueState<T>>,
+    }
+
+    impl<T> DeadlineQueue<T> {
+        fn new(delays: Vec<Duration>) -> DeadlineQueue<T> {
+            DeadlineQueue {
+                state: Mutex::new(DeadlineQueueState {
+                    delays: delays.into(),
+                    ready_ats: Vec::new(),
                     scripted_results: VecDeque::new(),
+                    tasks: VecDeque::new(),
                 }),
             }
         }
 
-        fn ready_at(&self) -> Instant {
-            self.state.lock().unwrap().ready_at.unwrap()
+        fn push_scripted_result(&self, result: DeadlineScript) {
+            self.state
+                .lock()
+                .unwrap()
+                .scripted_results
+                .push_back(result);
         }
 
-        fn scripted_results(&self, ready_at: Instant) -> VecDeque<DelayedPop> {
-            match self.scenario {
-                DelayedQueueScenario::PendingDuringSpinAndValidate => VecDeque::new(),
-                DelayedQueueScenario::EmptyDuringSpin => {
-                    let mut scripted_results = VecDeque::new();
-                    for _ in 0..WORKER_SPIN_POP_COUNT {
-                        scripted_results.push_back(DelayedPop::Empty);
-                    }
-                    scripted_results
-                }
-                DelayedQueueScenario::EarlierRetryInValidate => {
-                    let later_retry_at = ready_at + LATER_RETRY_OFFSET;
-                    let mut scripted_results = VecDeque::new();
-                    for _ in 0..WORKER_SPIN_POP_COUNT {
-                        scripted_results.push_back(DelayedPop::Pending(later_retry_at));
-                    }
-                    scripted_results.push_back(DelayedPop::Pending(ready_at));
-                    scripted_results
-                }
-            }
+        fn ready_at(&self, index: usize) -> Instant {
+            self.state.lock().unwrap().ready_ats[index]
         }
     }
 
-    impl<T: Send + 'static> TaskQueue<T> for DelayedQueue<T> {
+    impl<T: Send + 'static> TaskQueue<T> for DeadlineQueue<T> {
         fn push(&self, task_cell: T) {
-            let ready_at = Instant::now() + self.delay;
-            let scripted_results = self.scripted_results(ready_at);
             let mut state = self.state.lock().unwrap();
-            state.task = Some(task_cell);
-            state.ready_at = Some(ready_at);
-            state.scripted_results = scripted_results;
+            let delay = state.delays.pop_front().unwrap();
+            let ready_at = Instant::now() + delay;
+            state.ready_ats.push(ready_at);
+            state.tasks.push_back(DeadlineTask {
+                task_cell,
+                ready_at,
+            });
         }
 
         fn pop(&self) -> PopResult<T> {
             let mut state = self.state.lock().unwrap();
             if let Some(result) = state.scripted_results.pop_front() {
                 return match result {
-                    DelayedPop::Empty => PopResult::Empty,
-                    DelayedPop::Pending(retry_at) => PopResult::Pending { retry_at },
+                    DeadlineScript::Empty => PopResult::Empty,
+                    DeadlineScript::Pending(retry_at) => PopResult::Pending { retry_at },
                 };
             }
 
-            let ready_at = match state.ready_at {
-                Some(ready_at) => ready_at,
+            let (index, ready_at) = match state
+                .tasks
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, task)| task.ready_at)
+                .map(|(index, task)| (index, task.ready_at))
+            {
+                Some(task) => task,
                 None => return PopResult::Empty,
             };
+
             if Instant::now() < ready_at {
                 return PopResult::Pending { retry_at: ready_at };
             }
 
-            state
-                .task
-                .take()
-                .map(|task_cell| Pop {
-                    task_cell,
-                    schedule_time: ready_at,
-                    from_local: false,
-                })
-                .into()
+            let task = state.tasks.remove(index).unwrap();
+            PopResult::Ready(Pop {
+                task_cell: task.task_cell,
+                schedule_time: task.ready_at,
+                from_local: false,
+            })
         }
 
         fn drain(&self) {
             let mut state = self.state.lock().unwrap();
-            state.task = None;
-            state.ready_at = None;
             state.scripted_results.clear();
+            state.tasks.clear();
         }
 
         fn has_ready_task(&self) -> bool {
-            let state = self.state.lock().unwrap();
-            state.task.is_some()
-                && state
-                    .ready_at
-                    .is_some_and(|ready_at| Instant::now() >= ready_at)
+            self.state
+                .lock()
+                .unwrap()
+                .tasks
+                .iter()
+                .any(|task| Instant::now() >= task.ready_at)
         }
     }
 
@@ -380,89 +391,6 @@ mod tests {
         executed_value
     }
 
-    struct PendingThenReadyState<T> {
-        pending_task: Option<T>,
-        pending_retry_at: Option<Instant>,
-        ready_tasks: VecDeque<T>,
-    }
-
-    struct PendingThenReadyQueue<T> {
-        pending_delay: Duration,
-        state: Mutex<PendingThenReadyState<T>>,
-    }
-
-    impl<T> PendingThenReadyQueue<T> {
-        fn new() -> PendingThenReadyQueue<T> {
-            PendingThenReadyQueue {
-                pending_delay: LATER_RETRY_OFFSET,
-                state: Mutex::new(PendingThenReadyState {
-                    pending_task: None,
-                    pending_retry_at: None,
-                    ready_tasks: VecDeque::new(),
-                }),
-            }
-        }
-
-        fn pending_retry_at(&self) -> Instant {
-            self.state.lock().unwrap().pending_retry_at.unwrap()
-        }
-    }
-
-    impl<T: Send + 'static> TaskQueue<T> for PendingThenReadyQueue<T> {
-        fn push(&self, task_cell: T) {
-            let mut state = self.state.lock().unwrap();
-            if state.pending_task.is_none()
-                && state.pending_retry_at.is_none()
-                && state.ready_tasks.is_empty()
-            {
-                state.pending_task = Some(task_cell);
-                state.pending_retry_at = Some(Instant::now() + self.pending_delay);
-            } else {
-                state.ready_tasks.push_back(task_cell);
-            }
-        }
-
-        fn pop(&self) -> PopResult<T> {
-            let mut state = self.state.lock().unwrap();
-            if let Some(task_cell) = state.ready_tasks.pop_front() {
-                return PopResult::Ready(Pop {
-                    task_cell,
-                    schedule_time: Instant::now(),
-                    from_local: false,
-                });
-            }
-
-            let retry_at = match state.pending_retry_at {
-                Some(retry_at) => retry_at,
-                None => return PopResult::Empty,
-            };
-            if Instant::now() < retry_at {
-                return PopResult::Pending { retry_at };
-            }
-
-            state
-                .pending_task
-                .take()
-                .map(|task_cell| Pop {
-                    task_cell,
-                    schedule_time: retry_at,
-                    from_local: false,
-                })
-                .into()
-        }
-
-        fn drain(&self) {
-            let mut state = self.state.lock().unwrap();
-            state.pending_task = None;
-            state.pending_retry_at = None;
-            state.ready_tasks.clear();
-        }
-
-        fn has_ready_task(&self) -> bool {
-            !self.state.lock().unwrap().ready_tasks.is_empty()
-        }
-    }
-
     fn build_custom_worker(
         queue: Arc<dyn TaskQueue<callback::TaskCell>>,
     ) -> (
@@ -488,7 +416,7 @@ mod tests {
 
     fn check_worker_runs_ready_task_inserted_while_pending() {
         let _lock = lock_failpoint_tests();
-        let queue = Arc::new(PendingThenReadyQueue::new());
+        let queue = Arc::new(DeadlineQueue::new(vec![LATER_RETRY_OFFSET, Duration::ZERO]));
         let _guard = fail::FailScenario::setup();
         let (entered_rx, release_tx) =
             configure_blocking_failpoint("worker-pop-or-sleep-before-sleep");
@@ -497,7 +425,7 @@ mod tests {
         queue.push(callback_task(move |_: &mut callback::Handle<'_>| {
             unexpected_tx.send(()).unwrap();
         }));
-        let pending_retry_at = queue.pending_retry_at();
+        let pending_retry_at = queue.ready_at(0);
         let (remote, _pause_rx, metrics, handle) = build_custom_worker(queue.clone());
         entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
@@ -526,59 +454,6 @@ mod tests {
             assert_eq!(metrics.handle, 1);
             assert_eq!(metrics.end, 1);
         }
-    }
-
-    struct WakeQueue<T> {
-        tasks: Mutex<VecDeque<T>>,
-        push_tx: Mutex<mpsc::Sender<()>>,
-    }
-
-    impl<T> WakeQueue<T> {
-        fn new(push_tx: mpsc::Sender<()>) -> WakeQueue<T> {
-            WakeQueue {
-                tasks: Mutex::new(VecDeque::new()),
-                push_tx: Mutex::new(push_tx),
-            }
-        }
-    }
-
-    impl<T: Send + 'static> TaskQueue<T> for WakeQueue<T> {
-        fn push(&self, task_cell: T) {
-            self.tasks.lock().unwrap().push_back(task_cell);
-            let _ = self.push_tx.lock().unwrap().send(());
-        }
-
-        fn pop(&self) -> PopResult<T> {
-            self.tasks
-                .lock()
-                .unwrap()
-                .pop_front()
-                .map(|task_cell| Pop {
-                    task_cell,
-                    schedule_time: Instant::now(),
-                    from_local: false,
-                })
-                .into()
-        }
-
-        fn drain(&self) {
-            self.tasks.lock().unwrap().clear();
-        }
-
-        fn has_ready_task(&self) -> bool {
-            !self.tasks.lock().unwrap().is_empty()
-        }
-    }
-
-    fn build_wake_worker(
-        queue: Arc<WakeQueue<callback::TaskCell>>,
-    ) -> (
-        Remote<callback::TaskCell>,
-        mpsc::Receiver<()>,
-        Arc<Mutex<Metrics>>,
-        JoinHandle<()>,
-    ) {
-        build_custom_worker(queue)
     }
 
     fn configure_blocking_failpoint(name: &'static str) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
@@ -634,8 +509,8 @@ mod tests {
         let _guard = fail::FailScenario::setup();
         let (entered_rx, release_tx) = configure_blocking_failpoint(failpoint);
         let (push_tx, push_rx) = mpsc::channel();
-        let queue = Arc::new(WakeQueue::new(push_tx));
-        let (remote, pause_rx, metrics, handle) = build_wake_worker(queue);
+        let queue = Arc::new(ScriptedQueue::with_push_signal(Vec::new(), push_tx));
+        let (remote, pause_rx, metrics, handle) = build_custom_worker(queue);
 
         // The first pause means the worker has already observed Empty during
         // spin and is about to enter pop_or_sleep.
@@ -948,6 +823,52 @@ mod tests {
 
     #[cfg_attr(not(feature = "failpoints"), ignore)]
     #[test]
+    fn test_worker_refreshes_timeout_when_earlier_pending_task_is_inserted() {
+        // The worker is already queued to sleep with a later Pending retry.
+        // Pushing another delayed task with an earlier retry should wake it so
+        // the worker can replace the old timeout with the earlier deadline.
+        let _lock = lock_failpoint_tests();
+        let _guard = fail::FailScenario::setup();
+        let (entered_rx, release_tx) =
+            configure_blocking_failpoint("worker-pop-or-sleep-before-sleep");
+        let queue = Arc::new(DeadlineQueue::new(vec![
+            LATER_RETRY_OFFSET,
+            DELAYED_TASK_DELAY,
+        ]));
+        let (unexpected_tx, unexpected_rx) = mpsc::channel();
+        queue.push(callback_task(move |_: &mut callback::Handle<'_>| {
+            unexpected_tx.send(()).unwrap();
+        }));
+        let later_retry_at = queue.ready_at(0);
+        let (remote, _pause_rx, metrics, handle) = build_custom_worker(queue.clone());
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        release_tx.send(()).unwrap();
+
+        // Let the worker pass the before_sleep hook and block on the later
+        // timeout before pushing the earlier delayed task.
+        thread::sleep(Duration::from_millis(20));
+        let (done_tx, done_rx) = mpsc::channel();
+        remote.spawn(move |_: &mut callback::Handle<'_>| {
+            done_tx.send(Instant::now()).unwrap();
+        });
+        let earlier_retry_at = queue.ready_at(1);
+
+        let executed_at = done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(executed_at >= earlier_retry_at);
+        assert!(executed_at.duration_since(earlier_retry_at) <= MAX_DELAYED_TASK_LAG);
+        assert!(executed_at < later_retry_at);
+        assert!(unexpected_rx.try_recv().is_err());
+
+        remote.stop();
+        handle.join().unwrap();
+        let metrics = metrics.lock().unwrap();
+        assert_eq!(metrics.start, 1);
+        assert_eq!(metrics.handle, 1);
+        assert_eq!(metrics.end, 1);
+    }
+
+    #[cfg_attr(not(feature = "failpoints"), ignore)]
+    #[test]
     fn test_worker_wakes_when_task_inserted_before_park() {
         // The task is inserted after the worker decides to sleep, but before it
         // calls parking_lot_core::park. The validate callback should pop the
@@ -977,12 +898,26 @@ mod tests {
     fn check_worker_runs_delayed_task_without_new_insert(
         scenario: DelayedQueueScenario,
     ) -> (Instant, Instant) {
-        let queue = Arc::new(DelayedQueue::new(scenario));
+        let queue = Arc::new(DeadlineQueue::new(vec![DELAYED_TASK_DELAY]));
         let (done_tx, done_rx) = mpsc::channel();
         queue.push(callback_task(move |_: &mut callback::Handle<'_>| {
             done_tx.send(Instant::now()).unwrap();
         }));
-        let ready_at = queue.ready_at();
+        let ready_at = queue.ready_at(0);
+        match scenario {
+            DelayedQueueScenario::PendingDuringSpinAndValidate => {}
+            DelayedQueueScenario::EmptyDuringSpin => {
+                for _ in 0..WORKER_SPIN_POP_COUNT {
+                    queue.push_scripted_result(DeadlineScript::Empty);
+                }
+            }
+            DelayedQueueScenario::EarlierRetryInValidate => {
+                let later_retry_at = ready_at + LATER_RETRY_OFFSET;
+                for _ in 0..WORKER_SPIN_POP_COUNT {
+                    queue.push_scripted_result(DeadlineScript::Pending(later_retry_at));
+                }
+            }
+        }
         let (remote, _pause_rx, metrics, handle) = build_custom_worker(queue.clone());
         let executed_at = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
