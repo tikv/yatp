@@ -299,7 +299,7 @@ unsafe fn clone_task(task: *const ()) -> TaskCell {
 
 thread_local! {
     /// Local queue reference that is set before polling and unset after polled.
-    static LOCAL: Cell<*mut Local<TaskCell>> = Cell::new(std::ptr::null_mut());
+    static LOCAL: Cell<*mut Local<TaskCell>> = const { Cell::new(std::ptr::null_mut()) };
 }
 
 unsafe fn wake_task(task: Cow<'_, TaskCell>, reschedule: bool) {
@@ -370,7 +370,7 @@ impl Runner {
 }
 
 thread_local! {
-    static NEED_RESCHEDULE: Cell<bool> = Cell::new(false);
+    static NEED_RESCHEDULE: Cell<bool> = const { Cell::new(false) };
 }
 
 impl crate::pool::Runner for Runner {
@@ -552,6 +552,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::waker_clone_wake)]
     fn test_waker_clone() {
         test_wake_impl(|waker| waker.clone().wake());
     }

@@ -537,15 +537,17 @@ impl LevelManager {
         let total_tasks = (cur_total_tasks - last_total_tasks) as usize;
         // adjust the batch size after meeting enough tasks.
         if total_tasks > ADJUST_LEVEL_STEAL_SIZE_THRESHOLD {
-            let new_steal_count = if level_0_tasks == 0 {
-                // level 0 has no tasks, that means the current workloads are all low-priority tasks.
-                LEVEL_MAX_QUEUE_MAX_STEAL_SIZE
-            } else {
-                // by default level0 contains 80% of all tasks, so in the most common case, only
-                // pop 1 task from level max once, and increases level max batch size when the executed
-                // tasks are more than level0.
-                std::cmp::min(total_tasks / level_0_tasks, LEVEL_MAX_QUEUE_MAX_STEAL_SIZE)
-            };
+            // When level 0 has no tasks, the current workloads are all
+            // low-priority tasks, so use the maximum steal size.
+            let new_steal_count = total_tasks.checked_div(level_0_tasks).map_or(
+                LEVEL_MAX_QUEUE_MAX_STEAL_SIZE,
+                |steal_count| {
+                    // by default level0 contains 80% of all tasks, so in the most common case, only
+                    // pop 1 task from level max once, and increases level max batch size when the executed
+                    // tasks are more than level0.
+                    std::cmp::min(steal_count, LEVEL_MAX_QUEUE_MAX_STEAL_SIZE)
+                },
+            );
             self.max_level_queue_steal_size
                 .store(new_steal_count, SeqCst);
             for (i, c) in self.last_exec_tasks_per_level.iter().enumerate() {

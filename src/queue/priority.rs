@@ -365,7 +365,7 @@ mod tests {
 
     impl TaskPriorityProvider for OrderByIdProvider {
         fn priority_of(&self, extras: &Extras) -> u64 {
-            return extras.task_id();
+            extras.task_id()
         }
     }
 

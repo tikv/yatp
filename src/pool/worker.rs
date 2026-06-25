@@ -198,11 +198,12 @@ mod tests {
     }
 
     fn one_thread_config() -> SchedConfig {
-        let mut config = SchedConfig::default();
-        config.min_thread_count = 1;
-        config.max_thread_count = 1;
-        config.core_thread_count = AtomicUsize::new(1);
-        config
+        SchedConfig {
+            min_thread_count: 1,
+            max_thread_count: 1,
+            core_thread_count: AtomicUsize::new(1),
+            ..Default::default()
+        }
     }
 
     fn build_scripted_local(queue: Arc<ScriptedQueue<TestTask>>) -> Local<TestTask> {
@@ -231,9 +232,9 @@ mod tests {
 
     #[derive(Clone, Copy)]
     enum DelayedQueueScenario {
-        PendingThenPending,
-        EmptyThenPending,
-        PendingThenEarlierPending,
+        PendingDuringSpinAndValidate,
+        EmptyDuringSpin,
+        EarlierRetryInValidate,
     }
 
     enum DelayedPop {
@@ -272,15 +273,15 @@ mod tests {
 
         fn scripted_results(&self, ready_at: Instant) -> VecDeque<DelayedPop> {
             match self.scenario {
-                DelayedQueueScenario::PendingThenPending => VecDeque::new(),
-                DelayedQueueScenario::EmptyThenPending => {
+                DelayedQueueScenario::PendingDuringSpinAndValidate => VecDeque::new(),
+                DelayedQueueScenario::EmptyDuringSpin => {
                     let mut scripted_results = VecDeque::new();
                     for _ in 0..WORKER_SPIN_POP_COUNT {
                         scripted_results.push_back(DelayedPop::Empty);
                     }
                     scripted_results
                 }
-                DelayedQueueScenario::PendingThenEarlierPending => {
+                DelayedQueueScenario::EarlierRetryInValidate => {
                     let later_retry_at = ready_at + LATER_RETRY_OFFSET;
                     let mut scripted_results = VecDeque::new();
                     for _ in 0..WORKER_SPIN_POP_COUNT {
@@ -343,7 +344,7 @@ mod tests {
             state.task.is_some()
                 && state
                     .ready_at
-                    .map_or(false, |ready_at| Instant::now() >= ready_at)
+                    .is_some_and(|ready_at| Instant::now() >= ready_at)
         }
     }
 
@@ -1007,7 +1008,9 @@ mod tests {
         // The worker first observes Pending during spin, then observes Pending
         // again inside pop_or_sleep. With no later push, it should wake by the
         // retry timeout and run the delayed task.
-        check_worker_runs_delayed_task_without_new_insert(DelayedQueueScenario::PendingThenPending);
+        check_worker_runs_delayed_task_without_new_insert(
+            DelayedQueueScenario::PendingDuringSpinAndValidate,
+        );
     }
 
     #[test]
@@ -1015,7 +1018,7 @@ mod tests {
         // The worker first observes Empty during spin, then Pending inside
         // pop_or_sleep. The validate Pending retry should still drive a timed
         // park and let the delayed task run once it becomes ready.
-        check_worker_runs_delayed_task_without_new_insert(DelayedQueueScenario::EmptyThenPending);
+        check_worker_runs_delayed_task_without_new_insert(DelayedQueueScenario::EmptyDuringSpin);
     }
 
     #[test]
@@ -1024,7 +1027,7 @@ mod tests {
         // Pending retry in pop_or_sleep validate. It should use the shorter
         // retry instead of sleeping until the stale later deadline.
         let (executed_at, ready_at) = check_worker_runs_delayed_task_without_new_insert(
-            DelayedQueueScenario::PendingThenEarlierPending,
+            DelayedQueueScenario::EarlierRetryInValidate,
         );
         assert!(executed_at < ready_at + LATER_RETRY_OFFSET);
     }

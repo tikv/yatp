@@ -56,6 +56,7 @@ pub trait TaskQueue<T>: Send + Sync + 'static {
 }
 
 /// The configurations of custom task queues.
+#[derive(Default)]
 pub struct Config {
     name: Option<String>,
 }
@@ -65,12 +66,6 @@ impl Config {
     pub fn name(mut self, name: Option<impl Into<String>>) -> Self {
         self.name = name.map(Into::into);
         self
-    }
-}
-
-impl Default for Config {
-    fn default() -> Config {
-        Config { name: None }
     }
 }
 
