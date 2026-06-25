@@ -5,13 +5,14 @@
 //! tasks waiting to be handled.
 
 use crate::pool::SchedConfig;
-use crate::queue::{Extras, LocalQueue, Pop, TaskCell, TaskInjector, WithExtras};
+use crate::queue::{Extras, LocalQueue, Pop, PopResult, TaskCell, TaskInjector, WithExtras};
 use fail::fail_point;
-use parking_lot_core::{FilterOp, ParkResult, ParkToken, UnparkToken};
+use parking_lot_core::{FilterOp, ParkToken, UnparkToken};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Weak,
 };
+use std::time::Instant;
 
 /// An usize is used to trace the threads that are working actively.
 /// To save additional memory and atomic operation, the number and
@@ -309,46 +310,102 @@ impl<T: TaskCell + Send> Local<T> {
         &self.core
     }
 
-    pub(crate) fn pop(&mut self) -> Option<Pop<T>> {
+    pub(crate) fn pop(&mut self) -> PopResult<T> {
         self.local_queue.pop()
+    }
+
+    pub(crate) fn drain(&mut self) {
+        self.local_queue.drain();
     }
 
     /// Pops a task from the queue.
     ///
     /// If there are no tasks at the moment, it will go to sleep until woken
-    /// up by other threads.
-    pub(crate) fn pop_or_sleep(&mut self) -> Option<Pop<T>> {
+    /// up by other threads or until the next known pending-task retry time.
+    pub(crate) fn pop_or_sleep(&mut self, initial_retry_at: Option<Instant>) -> Option<Pop<T>> {
         let address = &*self.core as *const QueueCore<T> as usize;
-        let mut task = None;
         let id = self.id;
+        let mut timeout = initial_retry_at;
 
-        let res = unsafe {
-            parking_lot_core::park(
-                address,
-                || {
-                    if !self.core.mark_sleep() {
-                        return false;
-                    }
-                    // If this thread is above core_thread_count, go to sleep
-                    // without popping so scaled-down threads don't keep working.
-                    if id > self.core.config.core_thread_count.load(Ordering::SeqCst) {
-                        return true;
-                    }
-                    task = self.local_queue.pop();
-                    task.is_none()
-                },
-                || {},
-                |_, _| {},
-                ParkToken(id),
-                None,
-            )
-        };
-        match res {
-            ParkResult::Unparked(_) | ParkResult::Invalid => {
+        loop {
+            let mut task = None;
+            let mut next_timeout = None;
+            let mut marked_sleep = false;
+
+            fail_point!("worker-pop-or-sleep-before-park");
+            unsafe {
+                parking_lot_core::park(
+                    address,
+                    || {
+                        // Returning false from validate aborts this park and
+                        // makes parking_lot_core return ParkResult::Invalid.
+                        // Use it when the decision to sleep needs to be
+                        // changed after rechecking the queue.
+                        if !self.core.mark_sleep() {
+                            return false;
+                        }
+                        marked_sleep = true;
+                        // If this thread is above core_thread_count, go to sleep
+                        // without popping so scaled-down threads don't keep working.
+                        if id > self.core.config.core_thread_count.load(Ordering::SeqCst) {
+                            return true;
+                        }
+                        fail_point!("worker-pop-or-sleep-before-validate-pop");
+                        match self.local_queue.pop() {
+                            PopResult::Ready(t) => {
+                                task = Some(t);
+                                false
+                            }
+                            PopResult::Pending { retry_at } => match timeout {
+                                Some(timeout) if retry_at >= timeout => true,
+                                _ => {
+                                    // The current park call cannot change its
+                                    // timeout after validate has started. Abort
+                                    // this park so the outer loop can retry
+                                    // with a timeout that wakes no later than
+                                    // retry_at.
+                                    next_timeout = Some(retry_at);
+                                    false
+                                }
+                            },
+                            PopResult::Empty => true,
+                        }
+                    },
+                    || {
+                        fail_point!("worker-pop-or-sleep-before-sleep");
+                    },
+                    |_, _| {},
+                    ParkToken(id),
+                    timeout,
+                )
+            };
+
+            // mark_sleep decreases the active worker count before the park
+            // decision is finalized. Whether the thread actually slept,
+            // timed out, was unparked, or aborted the park from validate, the
+            // worker is running again after park returns, so restore the count.
+            if marked_sleep {
                 self.core.mark_woken();
-                task
             }
-            ParkResult::TimedOut => unreachable!(),
+
+            // If validate found a ready task, the park was aborted before the
+            // thread actually slept. Return it immediately.
+            if task.is_some() {
+                return task;
+            }
+
+            // If validate found pending work that needs an earlier retry time,
+            // retry park with the updated timeout. The current park call cannot
+            // change its timeout after validate has started.
+            if next_timeout.is_some() {
+                timeout = next_timeout;
+                continue;
+            }
+
+            // Otherwise the thread was either unparked, timed out, or the park
+            // was aborted without a task, for example because shutdown made
+            // mark_sleep fail. Let the worker loop re-check the pool state.
+            return None;
         }
     }
 
@@ -366,7 +423,7 @@ impl<T: TaskCell + Send> Local<T> {
 /// This is only for tests purpose so that a thread pool doesn't have to be
 /// spawned to test a Runner.
 pub fn build_spawn<T>(
-    queue_type: impl Into<crate::queue::QueueType>,
+    queue_type: impl Into<crate::queue::QueueType<T>>,
     config: SchedConfig,
 ) -> (Remote<T>, Vec<Local<T>>)
 where

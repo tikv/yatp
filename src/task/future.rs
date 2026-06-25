@@ -452,7 +452,7 @@ impl Future for Reschedule {
 mod tests {
     use super::*;
     use crate::pool::{build_spawn, Builder, Remote, Runner as _};
-    use crate::queue::QueueType;
+    use crate::queue::{PopResult, QueueType};
 
     use std::sync::mpsc;
     use std::{cell::RefCell, thread};
@@ -476,7 +476,7 @@ mod tests {
 
         /// Run `Runner::handle` once.
         fn handle_once(&mut self) {
-            if let Some(t) = self.locals[0].pop() {
+            if let PopResult::Ready(t) = self.locals[0].pop() {
                 let runner = self.runner.clone();
                 runner.borrow_mut().handle(&mut self.locals[0], t.task_cell);
             }

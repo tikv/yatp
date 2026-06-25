@@ -920,7 +920,7 @@ pub(super) fn recent() -> Instant {
 mod tests {
     use super::*;
     use crate::pool::build_spawn;
-    use crate::queue::Extras;
+    use crate::queue::{Extras, PopResult};
 
     use std::sync::atomic::AtomicU64;
     use std::sync::mpsc;
@@ -1023,7 +1023,7 @@ mod tests {
         let (injector, mut locals) = builder.build(1);
         injector.push(MockTask::new(0, Extras::multilevel_default()));
         thread::sleep(SLEEP_DUR);
-        let schedule_time = locals[0].pop().unwrap().schedule_time;
+        let schedule_time = locals[0].pop().unwrap_ready().schedule_time;
         assert!(schedule_time.elapsed() >= SLEEP_DUR);
     }
 
@@ -1120,10 +1120,10 @@ mod tests {
             injector.push(MockTask::new(i, Extras::multilevel_default()));
         }
         let sum: u64 = (0..100)
-            .map(|_| locals[2].pop().unwrap().task_cell.sleep_ms)
+            .map(|_| locals[2].pop().unwrap_ready().task_cell.sleep_ms)
             .sum();
         assert_eq!(sum, (0..100).sum());
-        assert!(locals.iter_mut().all(|c| c.pop().is_none()));
+        assert!(locals.iter_mut().all(|c| c.pop().is_empty()));
     }
 
     #[test]
@@ -1162,7 +1162,7 @@ mod tests {
             .map(|mut consumer| {
                 let sum = sum.clone();
                 thread::spawn(move || {
-                    while let Some(pop) = consumer.pop() {
+                    while let PopResult::Ready(pop) = consumer.pop() {
                         sum.fetch_add(pop.task_cell.sleep_ms, SeqCst);
                     }
                 })
@@ -1183,7 +1183,7 @@ mod tests {
         let mut runner = runner_builder.build();
 
         remote.spawn(MockTask::new(100, Extras::new_multilevel(1, None)));
-        if let Some(Pop { task_cell, .. }) = locals[0].pop() {
+        if let PopResult::Ready(Pop { task_cell, .. }) = locals[0].pop() {
             assert!(runner.handle(&mut locals[0], task_cell));
         }
         assert!(

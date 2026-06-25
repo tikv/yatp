@@ -230,13 +230,13 @@ impl Builder {
     /// Freezes the configurations and returns the task scheduler and
     /// a builder to for lazy spawning threads.
     ///
-    /// `queue_builder` is a closure that creates a task queue. It accepts the
-    /// number of local queues and returns the task injector and local queues.
+    /// `queue_type` selects a built-in queue, or a custom queue that implements
+    /// [`crate::queue::TaskQueue`].
     ///
     /// In some cases, especially building up a large application, a task
     /// scheduler is required before spawning new threads. You can use this
     /// to separate the construction and starting.
-    pub fn freeze_with_queue<T>(&self, queue_type: QueueType) -> (Remote<T>, LazyBuilder<T>)
+    pub fn freeze_with_queue<T>(&self, queue_type: QueueType<T>) -> (Remote<T>, LazyBuilder<T>)
     where
         T: TaskCell + Send,
     {
@@ -303,13 +303,26 @@ impl Builder {
         self.build_with_queue_and_runner(QueueType::Priority(queue_builder), runner_builder)
     }
 
+    /// Spawn a custom future pool.
+    ///
+    /// It setups the pool with the given custom queue.
+    pub fn build_custom_future_pool(
+        &self,
+        queue: Arc<dyn queue::TaskQueue<future::TaskCell>>,
+    ) -> ThreadPool<future::TaskCell> {
+        let fb = CloneRunnerBuilder(future::Runner::default());
+        let queue_builder = queue::CustomBuilder::new(queue::CustomConfig::default(), queue);
+        let runner_builder = queue_builder.runner_builder(fb);
+        self.build_with_queue_and_runner(queue_builder.into(), runner_builder)
+    }
+
     /// Spawns the thread pool immediately.
     ///
-    /// `queue_builder` is a closure that creates a task queue. It accepts the
-    /// number of local queues and returns the task injector and local queues.
+    /// `queue_type` selects a built-in queue, or a custom queue that implements
+    /// [`crate::queue::TaskQueue`].
     pub fn build_with_queue_and_runner<T, B>(
         &self,
-        queue_type: QueueType,
+        queue_type: QueueType<T>,
         runner_builder: B,
     ) -> ThreadPool<T>
     where

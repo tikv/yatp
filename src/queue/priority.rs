@@ -316,7 +316,7 @@ mod tests {
     use crate::pool::{build_spawn, Local, Runner, RunnerBuilder};
     use crate::queue::{
         multilevel::{now, recent},
-        Extras, InjectorInner,
+        Extras, InjectorInner, PopResult,
     };
     use rand::RngCore;
     #[derive(Debug)]
@@ -673,7 +673,7 @@ mod tests {
         for i in 0..4 {
             remote.spawn(MockTask::new(35, i));
         }
-        while let Some(Pop { task_cell, .. }) = locals[0].pop() {
+        while let PopResult::Ready(Pop { task_cell, .. }) = locals[0].pop() {
             assert!(runner.handle(&mut locals[0], task_cell));
         }
 
