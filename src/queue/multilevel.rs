@@ -559,12 +559,22 @@ impl LevelManager {
     }
 }
 
-pub(super) struct TaskLevelManager {
+/// Tracks task running time and assigns multilevel scheduling levels.
+///
+/// Custom queues can use this helper to reuse the same level calculation as the
+/// built-in multilevel and priority queues before inserting a task.
+pub struct TaskLevelManager {
     task_elapsed_map: TaskElapsedMap,
     level_time_threshold: [Duration; LEVEL_NUM - 1],
 }
 
 impl TaskLevelManager {
+    /// Creates a task level manager.
+    ///
+    /// `level_time_threshold` defines the accumulated running-time boundary for
+    /// each level. `cleanup_interval` controls automatic cleanup of old task
+    /// elapsed records; set it to `None` to disable automatic cleanup and call
+    /// [`TaskLevelManager::try_cleanup`] manually.
     pub fn new(
         level_time_threshold: [Duration; LEVEL_NUM - 1],
         cleanup_interval: Option<Duration>,
@@ -575,6 +585,11 @@ impl TaskLevelManager {
         }
     }
 
+    /// Updates the task's current level according to its accumulated running time.
+    ///
+    /// If the task has a fixed level, that level is used directly. Otherwise,
+    /// the manager looks up the task's accumulated running time and compares it
+    /// with the configured thresholds.
     pub fn adjust_task_level<T>(&self, task_cell: &mut T)
     where
         T: TaskCell,
@@ -599,7 +614,11 @@ impl TaskLevelManager {
         extras.current_level = current_level;
     }
 
-    pub(super) fn try_cleanup(&self) -> Option<Instant> {
+    /// Attempts to clean up old task elapsed records.
+    ///
+    /// Returns the cleanup time if this call performed cleanup, or `None` if
+    /// another caller is already cleaning up.
+    pub fn try_cleanup(&self) -> Option<Instant> {
         self.task_elapsed_map.try_cleanup()
     }
 
