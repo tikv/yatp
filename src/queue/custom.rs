@@ -178,6 +178,12 @@ impl<T: 'static> LocalQueue<T> {
     }
 
     /// Forcefully drains all tasks from the custom queue.
+    ///
+    /// Some queue implementations have local handles backed by shared queue
+    /// state. This adapter forwards each local drain directly to the
+    /// user-provided [`TaskQueue`], so shutdown may call [`TaskQueue::drain`]
+    /// from multiple worker threads. Implementations must be idempotent and
+    /// thread-safe.
     #[inline]
     pub fn drain(&self) {
         self.queue.drain();
@@ -199,7 +205,7 @@ mod tests {
         collections::VecDeque,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
-            mpsc, Arc, Mutex,
+            mpsc, Arc, Barrier, Mutex,
         },
         thread,
         time::{Duration, Instant},
@@ -477,6 +483,44 @@ mod tests {
         assert!(queue.drain_count() >= 1);
         assert_eq!(queue.len(), 0);
         assert!(locals[0].pop().is_empty());
+    }
+
+    #[test]
+    fn test_drain_is_idempotent_when_called_by_shared_locals() {
+        // Some queue implementations have local handles backed by shared queue
+        // state. The custom adapter exposes this contract to the user-provided
+        // queue by forwarding each local drain directly, so implementations must
+        // tolerate repeated and concurrent calls while leaving the queue fully
+        // cleared.
+        let queue = Arc::new(MockQueue::default());
+        let builder = Builder::new(Config::default(), queue.clone());
+        let (injector, locals) = builder.build(4);
+        let local_num = locals.len();
+        let barrier = Arc::new(Barrier::new(local_num));
+
+        for i in 0..16 {
+            injector.push(MockTask::new(i));
+        }
+        assert_eq!(queue.len(), 16);
+
+        let handles: Vec<_> = locals
+            .into_iter()
+            .map(|mut local| {
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    local.drain();
+                    local.drain();
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert!(queue.drain_count() >= local_num);
+        assert_eq!(queue.len(), 0);
     }
 
     #[test]
