@@ -265,6 +265,7 @@ mod tests {
     enum DeadlineScript {
         Empty,
         Pending(Instant),
+        PendingAfter(Duration),
     }
 
     struct DeadlineTask<T> {
@@ -346,6 +347,20 @@ mod tests {
                 return match result {
                     DeadlineScript::Empty => PopResult::Empty,
                     DeadlineScript::Pending(retry_at) => PopResult::Pending { retry_at },
+                    DeadlineScript::PendingAfter(delay) => {
+                        let retry_at = Instant::now() + delay;
+                        let index = state
+                            .tasks
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, task)| task.ready_at)
+                            .map(|(index, _)| index);
+                        if let Some(index) = index {
+                            state.tasks[index].ready_at = retry_at;
+                            state.ready_ats[index] = retry_at;
+                        }
+                        PopResult::Pending { retry_at }
+                    }
                 };
             }
 
@@ -1053,30 +1068,39 @@ mod tests {
     fn check_worker_runs_delayed_task_without_new_insert(
         scenario: DelayedQueueScenario,
     ) -> (Instant, Instant) {
-        let queue = Arc::new(DeadlineQueue::new(vec![DELAYED_TASK_DELAY]));
+        let queue = Arc::new(DeadlineQueue::new(vec![LATER_RETRY_OFFSET]));
         let (done_tx, done_rx) = mpsc::channel();
         queue.push(callback_task(move |_: &mut callback::Handle<'_>| {
             done_tx.send(Instant::now()).unwrap();
         }));
-        let ready_at = queue.ready_at(0);
         match scenario {
-            DelayedQueueScenario::PendingDuringSpinAndValidate => {}
+            DelayedQueueScenario::PendingDuringSpinAndValidate => {
+                let later_retry_at = Instant::now() + LATER_RETRY_OFFSET;
+                for _ in 0..WORKER_SPIN_POP_COUNT {
+                    queue.push_scripted_result(DeadlineScript::Pending(later_retry_at));
+                }
+            }
             DelayedQueueScenario::EmptyDuringSpin => {
                 for _ in 0..WORKER_SPIN_POP_COUNT {
                     queue.push_scripted_result(DeadlineScript::Empty);
                 }
             }
             DelayedQueueScenario::EarlierRetryInValidate => {
-                let later_retry_at = ready_at + LATER_RETRY_OFFSET;
+                let later_retry_at = Instant::now() + LATER_RETRY_OFFSET;
                 for _ in 0..WORKER_SPIN_POP_COUNT {
                     queue.push_scripted_result(DeadlineScript::Pending(later_retry_at));
                 }
             }
         }
+        // The retry deadline is installed while the worker is in pop_or_sleep
+        // validation. This keeps the test from depending on how quickly the CI
+        // runner starts the worker thread after the task was pushed.
+        queue.push_scripted_result(DeadlineScript::PendingAfter(DELAYED_TASK_DELAY));
         let (remote, _pause_rx, metrics, handle) = build_custom_worker(queue.clone());
         let executed_at = done_rx
             .recv_timeout(MAX_DELAYED_TASK_LAG + Duration::from_secs(1))
             .unwrap();
+        let ready_at = queue.ready_at(0);
 
         assert!(executed_at >= ready_at);
         assert!(executed_at.duration_since(ready_at) <= MAX_DELAYED_TASK_LAG);
