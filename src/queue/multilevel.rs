@@ -762,12 +762,24 @@ impl Config {
         self
     }
 
+    /// Returns the configured task queue name.
+    #[inline]
+    pub fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     /// Sets the time threshold of each level. It decides which level a task should be
     /// pushed into.
     #[inline]
     pub fn level_time_threshold(mut self, value: [Duration; LEVEL_NUM - 1]) -> Self {
         self.level_time_threshold = value;
         self
+    }
+
+    /// Returns the configured time threshold of each level.
+    #[inline]
+    pub fn get_level_time_threshold(&self) -> [Duration; LEVEL_NUM - 1] {
+        self.level_time_threshold
     }
 
     /// Sets the target proportion of time used by level 0 tasks.
@@ -782,6 +794,12 @@ impl Config {
         self
     }
 
+    /// Returns the configured target proportion of time used by level 0 tasks.
+    #[inline]
+    pub fn get_level0_proportion_target(&self) -> f64 {
+        self.level0_proportion_target
+    }
+
     /// Sets the interval of cleaning up task elapsed map.
     ///
     /// The pool tries to cleanup task elapsed map for every given interval. However, it may introduce tail latency on
@@ -793,6 +811,12 @@ impl Config {
     pub fn cleanup_interval(mut self, value: Option<Duration>) -> Self {
         self.cleanup_interval = value;
         self
+    }
+
+    /// Returns the configured interval of cleaning up task elapsed map.
+    #[inline]
+    pub fn get_cleanup_interval(&self) -> Option<Duration> {
+        self.cleanup_interval
     }
 }
 
@@ -1034,6 +1058,32 @@ mod tests {
         fn build(&mut self) -> MockRunner {
             MockRunner
         }
+    }
+
+    #[test]
+    fn test_config_getters() {
+        let config = Config::default();
+        assert_eq!(config.get_name(), None);
+        assert_eq!(
+            config.get_cleanup_interval(),
+            Some(DEFAULT_CLEANUP_OLD_MAP_INTERVAL)
+        );
+        assert_eq!(
+            config.get_level_time_threshold(),
+            [Duration::from_millis(5), Duration::from_millis(100)]
+        );
+        assert_eq!(config.get_level0_proportion_target(), 0.8);
+
+        let thresholds = [Duration::from_millis(10), Duration::from_millis(200)];
+        let config = Config::default()
+            .name(Some("test-multilevel"))
+            .cleanup_interval(None)
+            .level_time_threshold(thresholds)
+            .level0_proportion_target(0.7);
+        assert_eq!(config.get_name(), Some("test-multilevel"));
+        assert_eq!(config.get_cleanup_interval(), None);
+        assert_eq!(config.get_level_time_threshold(), thresholds);
+        assert_eq!(config.get_level0_proportion_target(), 0.7);
     }
 
     #[test]

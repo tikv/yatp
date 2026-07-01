@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use super::{
-    multilevel::{MultiLevelMetrics, TrackedRunnerBuilder},
-    PopResult,
+    multilevel::{now, MultiLevelMetrics, TrackedRunnerBuilder},
+    PopResult, TaskCell,
 };
 
 /// Common interface implemented by custom task queues used by the thread pool.
@@ -139,7 +139,11 @@ impl<T: 'static> TaskInjector<T> {
 
     /// Pushes a task into the custom queue.
     #[inline]
-    pub fn push(&self, task_cell: T) {
+    pub fn push(&self, mut task_cell: T)
+    where
+        T: TaskCell,
+    {
+        task_cell.mut_extras().schedule_time = Some(now());
         self.queue.push(task_cell);
     }
 }
@@ -167,7 +171,11 @@ impl<T: 'static> LocalQueue<T> {
 
     /// Pushes a task into the custom queue.
     #[inline]
-    pub fn push(&self, task_cell: T) {
+    pub fn push(&self, mut task_cell: T)
+    where
+        T: TaskCell,
+    {
+        task_cell.mut_extras().schedule_time = Some(now());
         self.queue.push(task_cell);
     }
 
@@ -406,12 +414,16 @@ mod tests {
         // The injector and all local handles wrap the same custom queue, so a
         // task pushed through the injector can be popped from any local handle.
         injector.push(MockTask::new(1));
-        assert_eq!(locals[0].pop().unwrap_ready().task_cell.id, 1);
+        let pop = locals[0].pop().unwrap_ready();
+        assert_eq!(pop.task_cell.id, 1);
+        assert!(pop.task_cell.extras.schedule_time.is_some());
 
         // A push through one local handle also goes to the shared custom queue,
         // not to per-worker local storage.
         locals[1].push(MockTask::new(2));
-        assert_eq!(locals[2].pop().unwrap_ready().task_cell.id, 2);
+        let pop = locals[2].pop().unwrap_ready();
+        assert_eq!(pop.task_cell.id, 2);
+        assert!(pop.task_cell.extras.schedule_time.is_some());
         assert!(locals[0].pop().is_empty());
     }
 

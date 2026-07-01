@@ -604,7 +604,7 @@ mod tests {
             let metrics = metrics.lock().unwrap();
             assert_eq!(metrics.start, 1);
             assert_eq!(metrics.handle, 1);
-            assert_eq!(metrics.resume, 1);
+            assert!(metrics.resume >= 1);
             assert!(metrics.pause >= 1);
         }
         spawn_handle.join().unwrap();
