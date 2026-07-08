@@ -235,6 +235,15 @@ fn test_scale_up_workers() {
 }
 
 #[test]
+#[should_panic(expected = "invalid pool builder configuration")]
+fn test_invalid_min_max_thread_count() {
+    Builder::new("test_invalid")
+        .max_thread_count(2)
+        .min_thread_count(3)
+        .build_callback_pool();
+}
+
+#[test]
 fn test_scale_down_workers() {
     let pool = Builder::new("test_scale_down")
         .max_thread_count(4)

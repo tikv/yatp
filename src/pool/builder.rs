@@ -240,7 +240,12 @@ impl Builder {
     where
         T: TaskCell + Send,
     {
-        assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
+        assert!(
+            self.sched_config.min_thread_count <= self.sched_config.max_thread_count,
+            "invalid pool builder configuration: min_thread_count ({}) exceeds max_thread_count ({})",
+            self.sched_config.min_thread_count,
+            self.sched_config.max_thread_count
+        );
         let core_thread_count = self.sched_config.core_thread_count.load(Ordering::SeqCst);
         if core_thread_count == 0 || core_thread_count > self.sched_config.max_thread_count {
             self.sched_config
