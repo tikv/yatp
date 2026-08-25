@@ -58,7 +58,7 @@ impl Clone for SchedConfig {
         SchedConfig {
             max_thread_count: self.max_thread_count,
             min_thread_count: self.min_thread_count,
-            core_thread_count: AtomicUsize::new(self.core_thread_count.load(Ordering::SeqCst)),
+            core_thread_count: AtomicUsize::new(self.core_thread_count.load(Ordering::Acquire)),
             max_inplace_spin: self.max_inplace_spin,
             max_idle_time: self.max_idle_time,
             max_wait_time: self.max_wait_time,
@@ -166,7 +166,7 @@ impl Builder {
         if count > 0 {
             self.sched_config
                 .core_thread_count
-                .store(count, Ordering::SeqCst);
+                .store(count, Ordering::Release);
         }
         self
     }
@@ -241,15 +241,15 @@ impl Builder {
         T: TaskCell + Send,
     {
         assert!(self.sched_config.min_thread_count <= self.sched_config.max_thread_count);
-        let core_thread_count = self.sched_config.core_thread_count.load(Ordering::SeqCst);
+        let core_thread_count = self.sched_config.core_thread_count.load(Ordering::Acquire);
         if core_thread_count == 0 || core_thread_count > self.sched_config.max_thread_count {
             self.sched_config
                 .core_thread_count
-                .store(self.sched_config.max_thread_count, Ordering::SeqCst);
+                .store(self.sched_config.max_thread_count, Ordering::Release);
         } else if core_thread_count < self.sched_config.min_thread_count {
             self.sched_config
                 .core_thread_count
-                .store(self.sched_config.min_thread_count, Ordering::SeqCst);
+                .store(self.sched_config.min_thread_count, Ordering::Release);
         }
         let (injector, local_queues) = queue::build(queue_type, self.sched_config.max_thread_count);
         let core = Arc::new(QueueCore::new(injector, self.sched_config.clone()));

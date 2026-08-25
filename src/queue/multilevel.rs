@@ -496,7 +496,7 @@ impl LevelManager {
     fn maybe_adjust_chance(&self) {
         if self
             .adjusting
-            .compare_exchange(false, true, SeqCst, SeqCst)
+            .compare_exchange(false, true, AcqRel, Acquire)
             .is_err()
         {
             return;
@@ -507,7 +507,7 @@ impl LevelManager {
         let total_diff = total - self.last_total_elapsed_us.get();
         if total_diff < ADJUST_CHANCE_INTERVAL_US {
             // Needn't change it now.
-            self.adjusting.store(false, SeqCst);
+            self.adjusting.store(false, Release);
             return;
         }
         let level0 = self.level0_elapsed_us.get();
@@ -549,13 +549,13 @@ impl LevelManager {
                 },
             );
             self.max_level_queue_steal_size
-                .store(new_steal_count, SeqCst);
+                .store(new_steal_count, Release);
             for (i, c) in self.last_exec_tasks_per_level.iter().enumerate() {
                 c.set(cur_total_tasks_per_level[i]);
             }
         }
 
-        self.adjusting.store(false, SeqCst);
+        self.adjusting.store(false, Release);
     }
 }
 
@@ -686,7 +686,7 @@ impl TaskElapsedMap {
     }
 
     fn get_elapsed(&self, key: u64) -> Arc<ElapsedTime> {
-        let new_index = self.new_index.load(SeqCst);
+        let new_index = self.new_index.load(Acquire);
         let new_map = &self.maps[new_index];
         let old_map = &self.maps[new_index ^ 1];
         if let Some(v) = new_map.get(&key) {
@@ -714,14 +714,14 @@ impl TaskElapsedMap {
 
     fn try_cleanup(&self) -> Option<Instant> {
         self.cleaning_up
-            .compare_exchange(false, true, SeqCst, SeqCst)
+            .compare_exchange(false, true, AcqRel, Acquire)
             .map(|_| {
-                let old_index = self.new_index.load(SeqCst) ^ 1;
+                let old_index = self.new_index.load(Acquire) ^ 1;
                 self.maps[old_index].clear();
-                self.new_index.store(old_index, SeqCst);
+                self.new_index.store(old_index, Release);
                 let now = now();
                 *self.last_cleanup_time.lock().unwrap() = now;
-                self.cleaning_up.store(false, SeqCst);
+                self.cleaning_up.store(false, Release);
                 now
             })
             .ok()

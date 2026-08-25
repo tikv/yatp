@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{
     AtomicU8, AtomicUsize,
-    Ordering::{Acquire, Relaxed, Release, SeqCst},
+    Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 use std::sync::{atomic, Arc};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
@@ -243,13 +243,13 @@ unsafe fn drop_raw(this: *const ()) {
 }
 
 unsafe fn wake_impl(task: Cow<'_, TaskCell>) {
-    let mut status = task.status().load(SeqCst);
+    let mut status = task.status().load(Acquire);
     loop {
         match status {
             IDLE => {
                 match task
                     .status()
-                    .compare_exchange_weak(IDLE, NOTIFIED, SeqCst, SeqCst)
+                    .compare_exchange_weak(IDLE, NOTIFIED, AcqRel, Acquire)
                 {
                     Ok(_) => {
                         wake_task(task, false);
@@ -261,7 +261,7 @@ unsafe fn wake_impl(task: Cow<'_, TaskCell>) {
             POLLING => {
                 match task
                     .status()
-                    .compare_exchange_weak(POLLING, NOTIFIED, SeqCst, SeqCst)
+                    .compare_exchange_weak(POLLING, NOTIFIED, AcqRel, Acquire)
                 {
                     Ok(_) => break,
                     Err(cur) => status = cur,
@@ -390,9 +390,9 @@ impl crate::pool::Runner for Runner {
             let mut cx = waker_ref.to_context();
             let mut repoll_times = 0;
             loop {
-                task_cell.status().store(POLLING, SeqCst);
+                task_cell.status().store(POLLING, Release);
                 if task_cell.poll(&mut cx).is_ready() {
-                    task_cell.status().store(COMPLETED, SeqCst);
+                    task_cell.status().store(COMPLETED, Release);
                     return true;
                 }
                 let extras = { &mut *task_cell.extras().get() };
@@ -406,7 +406,7 @@ impl crate::pool::Runner for Runner {
                 }
                 match task_cell
                     .status()
-                    .compare_exchange(POLLING, IDLE, SeqCst, SeqCst)
+                    .compare_exchange(POLLING, IDLE, AcqRel, Acquire)
                 {
                     Ok(_) => return false,
                     Err(NOTIFIED) => {

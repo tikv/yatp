@@ -6,6 +6,7 @@
 
 use crate::pool::SchedConfig;
 use crate::queue::{Extras, LocalQueue, Pop, PopResult, TaskCell, TaskInjector, WithExtras};
+use crossbeam_utils::CachePadded;
 use fail::fail_point;
 use parking_lot_core::{FilterOp, ParkResult, ParkToken, UnparkToken};
 use std::sync::{
@@ -13,6 +14,9 @@ use std::sync::{
     Arc, Weak,
 };
 use std::time::Instant;
+
+// crossbeam_utils::CachePadded is used to isolate active_workers to its
+// own cache line, preventing false sharing with global_queue in QueueCore.
 
 /// An usize is used to trace the threads that are working actively.
 /// To save additional memory and atomic operation, the number and
@@ -36,9 +40,10 @@ pub fn is_shutdown(cnt: usize) -> bool {
 ///
 /// Every thread pool instance should have one and only `QueueCore`. It's
 /// saved in an `Arc` and shared between all worker threads and remote handles.
+
 pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
-    active_workers: AtomicUsize,
+    active_workers: CachePadded<AtomicUsize>,
     config: SchedConfig,
 }
 
@@ -46,7 +51,7 @@ impl<T> QueueCore<T> {
     pub fn new(global_queue: TaskInjector<T>, config: SchedConfig) -> QueueCore<T> {
         QueueCore {
             global_queue,
-            active_workers: AtomicUsize::new(config.max_thread_count << WORKER_COUNT_SHIFT),
+            active_workers: CachePadded::new(AtomicUsize::new(config.max_thread_count << WORKER_COUNT_SHIFT)),
             config,
         }
     }
@@ -56,8 +61,8 @@ impl<T> QueueCore<T> {
     /// If the method is going to wake up any threads, source is used to trace who triggers
     /// the action.
     pub fn ensure_workers(&self, source: usize) {
-        let cnt = self.active_workers.load(Ordering::SeqCst);
-        if (cnt >> WORKER_COUNT_SHIFT) >= self.config.core_thread_count.load(Ordering::SeqCst)
+        let cnt = self.active_workers.load(Ordering::Acquire);
+        if (cnt >> WORKER_COUNT_SHIFT) >= self.config.core_thread_count.load(Ordering::Acquire)
             || is_shutdown(cnt)
         {
             return;
@@ -74,7 +79,7 @@ impl<T> QueueCore<T> {
             parking_lot_core::unpark_filter(
                 addr,
                 |p: ParkToken| {
-                    if !unparked_once && p.0 <= self.config.core_thread_count.load(Ordering::SeqCst)
+                    if !unparked_once && p.0 <= self.config.core_thread_count.load(Ordering::Acquire)
                     {
                         unparked_once = true;
                         FilterOp::Unpark
@@ -91,7 +96,7 @@ impl<T> QueueCore<T> {
     ///
     /// `source` is used to trace who triggers the action.
     pub fn mark_shutdown(&self, source: usize) {
-        self.active_workers.fetch_or(SHUTDOWN_BIT, Ordering::SeqCst);
+        self.active_workers.fetch_or(SHUTDOWN_BIT, Ordering::AcqRel);
         let addr = self as *const QueueCore<T> as usize;
         unsafe {
             parking_lot_core::unpark_all(addr, UnparkToken(source));
@@ -100,7 +105,7 @@ impl<T> QueueCore<T> {
 
     /// Checks if the thread pool is shutting down.
     pub fn is_shutdown(&self) -> bool {
-        let cnt = self.active_workers.load(Ordering::SeqCst);
+        let cnt = self.active_workers.load(Ordering::Acquire);
         is_shutdown(cnt)
     }
 
@@ -108,7 +113,7 @@ impl<T> QueueCore<T> {
     ///
     /// It can be marked as sleep only when the pool is not shutting down.
     pub fn mark_sleep(&self) -> bool {
-        let mut cnt = self.active_workers.load(Ordering::SeqCst);
+        let mut cnt = self.active_workers.load(Ordering::Acquire);
         loop {
             if is_shutdown(cnt) {
                 return false;
@@ -117,8 +122,8 @@ impl<T> QueueCore<T> {
             match self.active_workers.compare_exchange_weak(
                 cnt,
                 cnt - WORKER_COUNT_BASE,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::AcqRel,
+                Ordering::Acquire,
             ) {
                 Ok(_) => return true,
                 Err(n) => cnt = n,
@@ -128,13 +133,13 @@ impl<T> QueueCore<T> {
 
     /// Marks current thread as woken up states.
     pub fn mark_woken(&self) {
-        let mut cnt = self.active_workers.load(Ordering::SeqCst);
+        let mut cnt = self.active_workers.load(Ordering::Acquire);
         loop {
             match self.active_workers.compare_exchange_weak(
                 cnt,
                 cnt + WORKER_COUNT_BASE,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::AcqRel,
+                Ordering::Acquire,
             ) {
                 Ok(_) => return,
                 Err(n) => cnt = n,
@@ -151,7 +156,7 @@ impl<T> QueueCore<T> {
         }
         self.config
             .core_thread_count
-            .store(new_thread_count, Ordering::SeqCst);
+            .store(new_thread_count, Ordering::Release);
     }
 
     pub fn config(&self) -> &SchedConfig {
@@ -319,7 +324,7 @@ impl<T: TaskCell + Send> Local<T> {
     }
 
     pub(crate) fn is_scaled_down_worker(&self) -> bool {
-        self.id > self.core.config.core_thread_count.load(Ordering::SeqCst)
+        self.id > self.core.config.core_thread_count.load(Ordering::Acquire)
     }
 
     pub(crate) fn drain(&mut self) {
@@ -355,7 +360,7 @@ impl<T: TaskCell + Send> Local<T> {
                         marked_sleep = true;
                         // If this thread is above core_thread_count, go to sleep
                         // without popping so scaled-down threads don't keep working.
-                        if id > self.core.config.core_thread_count.load(Ordering::SeqCst) {
+                        if id > self.core.config.core_thread_count.load(Ordering::Acquire) {
                             return true;
                         }
                         fail_point!("worker-pop-or-sleep-before-validate-pop");
