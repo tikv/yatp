@@ -327,6 +327,13 @@ impl<T: TaskCell + Send> Local<T> {
         self.id > self.core.config.core_thread_count.load(Ordering::Acquire)
     }
 
+    /// Whether this worker should park instead of picking up more work.
+    /// Custom queues are exempt: their `Pending` deadline is only observed on
+    /// the pop path, so a scaled-down worker still has to go through it.
+    pub(crate) fn should_park_before_pop(&self) -> bool {
+        !self.local_queue.may_defer() && self.is_scaled_down_worker()
+    }
+
     pub(crate) fn drain(&mut self) {
         self.local_queue.drain();
     }

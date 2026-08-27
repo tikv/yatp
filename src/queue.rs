@@ -219,6 +219,13 @@ impl<T: TaskCell + Send> LocalQueue<T> {
         }
     }
 
+    /// Whether `pop` can return [`PopResult::Pending`]. Only custom queues
+    /// schedule tasks by time; the others are always `Ready` or `Empty`.
+    #[inline]
+    pub(crate) fn may_defer(&self) -> bool {
+        matches!(self.0, LocalQueueInner::Custom(_))
+    }
+
     /// Forcefully drains all currently queued tasks.
     #[inline]
     pub fn drain(&mut self) {
