@@ -22,16 +22,23 @@ where
 {
     #[inline]
     fn pop(&mut self) -> Option<Pop<T>> {
-        // Wait some time before going to sleep, which is more expensive.
-        let mut spin = SpinWait::new();
-        let initial_retry_at = loop {
-            let retry_at = match self.local.pop() {
-                PopResult::Ready(task) => return Some(task),
-                PopResult::Pending { retry_at } => Some(retry_at),
-                PopResult::Empty => None,
-            };
-            if !spin.spin() {
-                break retry_at;
+        // A surplus worker has to stop taking work, not merely stop being woken
+        // up: on a queue that never drains, the spin-pop below always finds a
+        // task and `core_thread_count` never takes effect.
+        let initial_retry_at = if self.local.should_park_before_pop() {
+            None
+        } else {
+            // Wait some time before going to sleep, which is more expensive.
+            let mut spin = SpinWait::new();
+            loop {
+                let retry_at = match self.local.pop() {
+                    PopResult::Ready(task) => return Some(task),
+                    PopResult::Pending { retry_at } => Some(retry_at),
+                    PopResult::Empty => None,
+                };
+                if !spin.spin() {
+                    break retry_at;
+                }
             }
         };
         self.runner.pause(&mut self.local);
@@ -944,6 +951,42 @@ mod tests {
         let metrics = metrics.lock().unwrap();
         assert_eq!(metrics.start, 1);
         assert_eq!(metrics.handle, 1);
+        assert_eq!(metrics.end, 1);
+    }
+
+    #[test]
+    fn test_scaled_down_worker_parks_while_tasks_are_queued() {
+        // Scaling in must take effect even when the queue never runs dry, so a
+        // worker above core_thread_count parks without handling a task.
+        // This worker parks, so it trips the shared park failpoints; hold the
+        // lock to keep it out of the failpoint tests' counters.
+        let _lock = lock_failpoint_tests();
+        let config = SchedConfig {
+            min_thread_count: 1,
+            max_thread_count: 2,
+            core_thread_count: AtomicUsize::new(1),
+            ..Default::default()
+        };
+        let (injector, mut locals) = build_spawn(QueueType::SingleLevel, config);
+        let handled = Arc::new(AtomicUsize::new(0));
+        for _ in 0..8 {
+            let handled = handled.clone();
+            injector.spawn(move |_: &mut callback::Handle<'_>| {
+                handled.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        // The second local is above core_thread_count.
+        let (pause_rx, metrics, handle) = start_custom_worker(locals.remove(1));
+
+        pause_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(handled.load(Ordering::SeqCst), 0);
+
+        injector.stop();
+        handle.join().unwrap();
+        let metrics = metrics.lock().unwrap();
+        assert_eq!(metrics.start, 1);
+        assert_eq!(metrics.handle, 0);
         assert_eq!(metrics.end, 1);
     }
 
