@@ -25,22 +25,20 @@ where
         // A surplus worker has to stop taking work, not merely stop being woken
         // up: on a queue that never drains, the spin-pop below always finds a
         // task and `core_thread_count` never takes effect.
-        if self.local.should_park_before_pop() {
-            self.runner.pause(&mut self.local);
-            let t = self.local.pop_or_sleep(None);
-            self.runner.resume(&mut self.local);
-            return t;
-        }
-        // Wait some time before going to sleep, which is more expensive.
-        let mut spin = SpinWait::new();
-        let initial_retry_at = loop {
-            let retry_at = match self.local.pop() {
-                PopResult::Ready(task) => return Some(task),
-                PopResult::Pending { retry_at } => Some(retry_at),
-                PopResult::Empty => None,
-            };
-            if !spin.spin() {
-                break retry_at;
+        let initial_retry_at = if self.local.should_park_before_pop() {
+            None
+        } else {
+            // Wait some time before going to sleep, which is more expensive.
+            let mut spin = SpinWait::new();
+            loop {
+                let retry_at = match self.local.pop() {
+                    PopResult::Ready(task) => return Some(task),
+                    PopResult::Pending { retry_at } => Some(retry_at),
+                    PopResult::Empty => None,
+                };
+                if !spin.spin() {
+                    break retry_at;
+                }
             }
         };
         self.runner.pause(&mut self.local);
