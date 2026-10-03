@@ -294,3 +294,82 @@ fn test_scale_down_workers() {
 
     pool.shutdown();
 }
+
+#[test]
+fn test_spawn_right_after_build_with_surplus_workers() {
+    // Regression test for the lost wakeup introduced by #96.
+    //
+    // A pool whose `max_thread_count` exceeds `core_thread_count` spawns
+    // surplus workers that park without ever popping. `active_workers` used to
+    // be seeded with `max_thread_count`, so until every surplus worker had
+    // parked once, `ensure_workers` believed enough workers were awake and
+    // skipped waking a core worker. A task pushed in that window (which is
+    // exactly when callers spawn their first long-lived task) could sit in the
+    // injector forever. The window is only a few hundred microseconds wide, so
+    // build many pools to hit it reliably.
+    for i in 0..200 {
+        let pool = Builder::new(format!("test_surplus_wake_{}", i))
+            .min_thread_count(1)
+            .core_thread_count(2)
+            .max_thread_count(16)
+            .build_callback_pool();
+        let (tx, rx) = mpsc::channel();
+        pool.spawn(move |_: &mut Handle<'_>| tx.send(()).unwrap());
+        assert_eq!(
+            Ok(()),
+            rx.recv_timeout(Duration::from_secs(2)),
+            "task spawned right after build never ran (iteration {})",
+            i
+        );
+        // Shutdown must also complete while surplus workers may still be on
+        // their way to their first park.
+        pool.shutdown();
+    }
+}
+
+#[test]
+fn test_active_workers_tracks_core_after_scaling() {
+    // Surplus workers must not be counted as active, before or after scaling.
+    // A push into an idle pool has to wake a core worker regardless of how
+    // many times the core line has moved.
+    let pool = Builder::new("test_surplus_scaling")
+        .min_thread_count(1)
+        .core_thread_count(2)
+        .max_thread_count(4)
+        .build_callback_pool();
+    // Let every worker reach its first park.
+    thread::sleep(Duration::from_millis(200));
+
+    let (tx, rx) = mpsc::channel();
+    for round in 0..3 {
+        // Scale down to a single core worker and back up again, so workers
+        // cross the core line in both directions.
+        pool.scale_workers(1);
+        let t = tx.clone();
+        pool.spawn(move |_: &mut Handle<'_>| t.send((round, 1)).unwrap());
+        assert_eq!(Ok((round, 1)), rx.recv_timeout(Duration::from_secs(1)));
+        thread::sleep(Duration::from_millis(50));
+
+        pool.scale_workers(4);
+        let t = tx.clone();
+        pool.spawn(move |_: &mut Handle<'_>| t.send((round, 2)).unwrap());
+        assert_eq!(Ok((round, 2)), rx.recv_timeout(Duration::from_secs(1)));
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // With all four workers eligible, four blocking tasks plus one more must
+    // all make progress.
+    let mut sync_txs = vec![];
+    for _ in 0..4 {
+        let (btx, brx) = mpsc::sync_channel::<()>(0);
+        pool.spawn(move |_: &mut Handle<'_>| brx.recv().unwrap());
+        sync_txs.push(btx);
+    }
+    let t = tx.clone();
+    pool.spawn(move |_: &mut Handle<'_>| t.send((9, 9)).unwrap());
+    for btx in sync_txs {
+        btx.send(()).unwrap();
+    }
+    assert_eq!(Ok((9, 9)), rx.recv_timeout(Duration::from_secs(1)));
+    pool.shutdown();
+}
