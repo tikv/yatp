@@ -64,11 +64,16 @@ impl<T> QueueCore<T> {
         // never be counted: otherwise `ensure_workers` believes there are
         // pullers available and skips waking a core worker, leaving pushed
         // tasks stranded until an unrelated later push.
+        //
+        // The counter starts at zero and each eligible worker registers itself
+        // in `Local::new`. Seeding it here from `core_thread_count` would be
+        // wrong: `Builder::freeze_with_queue` hands out a `Remote` before
+        // `LazyBuilder::build` creates the workers, and a `scale_workers` call
+        // in between would leave the seed and the set of counted workers out
+        // of sync (stranding tasks on scale-down, underflowing on scale-up).
         QueueCore {
             global_queue,
-            active_workers: CachePadded::new(AtomicUsize::new(
-                core_thread_count << WORKER_COUNT_SHIFT,
-            )),
+            active_workers: CachePadded::new(AtomicUsize::new(0)),
             config,
         }
     }
@@ -309,7 +314,16 @@ pub struct Local<T> {
 
 impl<T: TaskCell + Send> Local<T> {
     pub(crate) fn new(id: usize, local_queue: LocalQueue<T>, core: Arc<QueueCore<T>>) -> Local<T> {
+        // Register with `active_workers` here rather than seeding the counter
+        // in `QueueCore::new`, so the counter always reflects exactly the set
+        // of workers that will later decrement it, whatever the core count was
+        // when the `QueueCore` was built. If the core count changes before this
+        // worker's thread first parks, the park path reconciles `counted` with
+        // eligibility exactly once.
         let counted = id <= core.config.core_thread_count.load(Ordering::Acquire);
+        if counted {
+            core.mark_woken();
+        }
         Local {
             id,
             local_queue,

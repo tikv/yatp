@@ -373,3 +373,43 @@ fn test_active_workers_tracks_core_after_scaling() {
     assert_eq!(Ok((9, 9)), rx.recv_timeout(Duration::from_secs(1)));
     pool.shutdown();
 }
+
+#[test]
+fn test_scale_between_freeze_and_build() {
+    // `freeze` hands out a `Remote` before `LazyBuilder::build` creates the
+    // workers. A `scale_workers` call in that window must not desynchronize
+    // `active_workers` from the set of workers that consider themselves
+    // counted: scaling down used to leave the counter above the core count
+    // (so pushes never woke the remaining core worker), and scaling up used to
+    // make more workers decrement than were seeded (underflow).
+    for (core, scaled) in [(2, 1), (1, 2), (4, 1), (1, 4)] {
+        for i in 0..20 {
+            let (remote, lazy) =
+                Builder::new(format!("test_freeze_scale_{}_{}_{}", core, scaled, i))
+                    .min_thread_count(1)
+                    .core_thread_count(core)
+                    .max_thread_count(4)
+                    .freeze::<crate::task::callback::TaskCell>();
+            remote.scale_workers(scaled);
+            let pool = lazy.build(CloneRunnerBuilder(crate::task::callback::Runner::default()));
+            // Let every worker reach its first park, then push into an idle
+            // pool: the push must wake an eligible worker.
+            thread::sleep(Duration::from_millis(50));
+            let (tx, rx) = mpsc::channel();
+            for _ in 0..3 {
+                let t = tx.clone();
+                pool.spawn(move |_: &mut Handle<'_>| t.send(()).unwrap());
+                assert_eq!(
+                    Ok(()),
+                    rx.recv_timeout(Duration::from_secs(2)),
+                    "task stranded after scaling {} -> {} between freeze and build (iteration {})",
+                    core,
+                    scaled,
+                    i
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            pool.shutdown();
+        }
+    }
+}
