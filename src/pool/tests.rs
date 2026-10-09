@@ -413,3 +413,43 @@ fn test_scale_between_freeze_and_build() {
         }
     }
 }
+
+#[test]
+fn test_scale_down_while_worker_busy_hands_off() {
+    // A worker that is counted in `active_workers` and then scaled out of the
+    // core set (while running a task, or because `scale_workers` raced with
+    // its registration in `Local::new`) must wake a core worker when it
+    // leaves the active set. Otherwise a task pushed while it was counted
+    // stays in the injector: `ensure_workers` saw an active worker and skipped
+    // the wake, and the now-surplus worker parks without popping.
+    let pool = Builder::new("test_scale_down_busy")
+        .min_thread_count(1)
+        .core_thread_count(2)
+        .max_thread_count(2)
+        .build_callback_pool();
+    thread::sleep(Duration::from_millis(100));
+
+    let (tx, rx) = mpsc::channel();
+    for i in 0..40 {
+        pool.scale_workers(2);
+        thread::sleep(Duration::from_millis(20));
+        // Occupy one of the two core workers; the other one parks.
+        let (block_tx, block_rx) = mpsc::sync_channel::<()>(0);
+        pool.spawn(move |_: &mut Handle<'_>| block_rx.recv().unwrap());
+        thread::sleep(Duration::from_millis(20));
+        // Scale down so the busy worker may now be surplus, then push while it
+        // is still counted.
+        pool.scale_workers(1);
+        let t = tx.clone();
+        pool.spawn(move |_: &mut Handle<'_>| t.send(i).unwrap());
+        thread::sleep(Duration::from_millis(20));
+        block_tx.send(()).unwrap();
+        assert_eq!(
+            Ok(i),
+            rx.recv_timeout(Duration::from_secs(2)),
+            "task stranded after scaling down while a worker was busy (iteration {})",
+            i
+        );
+    }
+    pool.shutdown();
+}

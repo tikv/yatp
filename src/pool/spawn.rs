@@ -390,6 +390,7 @@ impl<T: TaskCell + Send> Local<T> {
         while !self.core.is_shutdown() {
             let mut task = None;
             let mut next_timeout = None;
+            let mut scaled_out = false;
 
             fail_point!("worker-pop-or-sleep-before-park");
             let park_result = unsafe {
@@ -412,6 +413,18 @@ impl<T: TaskCell + Send> Local<T> {
                                 return false;
                             }
                             self.counted = false;
+                            if !eligible {
+                                // This worker was counted as an available
+                                // puller until just now, so `ensure_workers`
+                                // may have skipped waking a core worker for a
+                                // task pushed in the meantime. Abort the park
+                                // and hand off outside the park lock: the
+                                // scale-down may have raced with registration
+                                // in `Local::new` or with this worker running
+                                // a task, and nothing else re-checks the queue.
+                                scaled_out = true;
+                                return false;
+                            }
                         } else if self.core.is_shutdown() {
                             // `mark_sleep` doubles as the shutdown check for
                             // counted workers. An uncounted worker must check
@@ -479,6 +492,14 @@ impl<T: TaskCell + Send> Local<T> {
             // change its timeout after validate has started.
             if next_timeout.is_some() {
                 timeout = next_timeout;
+                continue;
+            }
+
+            if scaled_out {
+                // Now that this worker has left the active set, let a core
+                // worker pick up anything that was pushed while it was still
+                // counted, then park without popping like any surplus worker.
+                self.core.ensure_workers(id);
                 continue;
             }
 
