@@ -40,7 +40,6 @@ pub fn is_shutdown(cnt: usize) -> bool {
 ///
 /// Every thread pool instance should have one and only `QueueCore`. It's
 /// saved in an `Arc` and shared between all worker threads and remote handles.
-
 pub(crate) struct QueueCore<T> {
     global_queue: TaskInjector<T>,
     active_workers: CachePadded<AtomicUsize>,
@@ -49,9 +48,32 @@ pub(crate) struct QueueCore<T> {
 
 impl<T> QueueCore<T> {
     pub fn new(global_queue: TaskInjector<T>, config: SchedConfig) -> QueueCore<T> {
+        // Normalize `core_thread_count` the same way `Builder::freeze_with_queue`
+        // does, so callers that construct a `SchedConfig` by hand (tests via
+        // `build_spawn`) start from a consistent value.
+        let mut core_thread_count = config.core_thread_count.load(Ordering::Acquire);
+        if core_thread_count == 0 || core_thread_count > config.max_thread_count {
+            core_thread_count = config.max_thread_count;
+        }
+        config
+            .core_thread_count
+            .store(core_thread_count, Ordering::Release);
+        // `active_workers` counts workers that are awake *and* eligible to pop
+        // tasks, i.e. workers with `id <= core_thread_count`. Surplus workers
+        // (`id > core_thread_count`) never pop after scale-down, so they must
+        // never be counted: otherwise `ensure_workers` believes there are
+        // pullers available and skips waking a core worker, leaving pushed
+        // tasks stranded until an unrelated later push.
+        //
+        // The counter starts at zero and each eligible worker registers itself
+        // in `Local::new`. Seeding it here from `core_thread_count` would be
+        // wrong: `Builder::freeze_with_queue` hands out a `Remote` before
+        // `LazyBuilder::build` creates the workers, and a `scale_workers` call
+        // in between would leave the seed and the set of counted workers out
+        // of sync (stranding tasks on scale-down, underflowing on scale-up).
         QueueCore {
             global_queue,
-            active_workers: CachePadded::new(AtomicUsize::new(config.max_thread_count << WORKER_COUNT_SHIFT)),
+            active_workers: CachePadded::new(AtomicUsize::new(0)),
             config,
         }
     }
@@ -79,7 +101,8 @@ impl<T> QueueCore<T> {
             parking_lot_core::unpark_filter(
                 addr,
                 |p: ParkToken| {
-                    if !unparked_once && p.0 <= self.config.core_thread_count.load(Ordering::Acquire)
+                    if !unparked_once
+                        && p.0 <= self.config.core_thread_count.load(Ordering::Acquire)
                     {
                         unparked_once = true;
                         FilterOp::Unpark
@@ -281,14 +304,31 @@ pub struct Local<T> {
     id: usize,
     local_queue: LocalQueue<T>,
     core: Arc<QueueCore<T>>,
+    /// Whether this worker is currently included in `QueueCore::active_workers`.
+    ///
+    /// Only workers that are awake and eligible to pop (`id <= core_thread_count`)
+    /// are counted. A surplus worker is uncounted for as long as it stays above
+    /// the core line, no matter how many times it parks and unparks.
+    counted: bool,
 }
 
 impl<T: TaskCell + Send> Local<T> {
     pub(crate) fn new(id: usize, local_queue: LocalQueue<T>, core: Arc<QueueCore<T>>) -> Local<T> {
+        // Register with `active_workers` here rather than seeding the counter
+        // in `QueueCore::new`, so the counter always reflects exactly the set
+        // of workers that will later decrement it, whatever the core count was
+        // when the `QueueCore` was built. If the core count changes before this
+        // worker's thread first parks, the park path reconciles `counted` with
+        // eligibility exactly once.
+        let counted = id <= core.config.core_thread_count.load(Ordering::Acquire);
+        if counted {
+            core.mark_woken();
+        }
         Local {
             id,
             local_queue,
             core,
+            counted,
         }
     }
 
@@ -350,7 +390,7 @@ impl<T: TaskCell + Send> Local<T> {
         while !self.core.is_shutdown() {
             let mut task = None;
             let mut next_timeout = None;
-            let mut marked_sleep = false;
+            let mut scaled_out = false;
 
             fail_point!("worker-pop-or-sleep-before-park");
             let park_result = unsafe {
@@ -361,13 +401,40 @@ impl<T: TaskCell + Send> Local<T> {
                         // makes parking_lot_core return ParkResult::Invalid.
                         // Use it when the decision to sleep needs to be
                         // changed after rechecking the queue.
-                        if !self.core.mark_sleep() {
+                        let eligible =
+                            id <= self.core.config.core_thread_count.load(Ordering::Acquire);
+                        // Leave the active set exactly once, whether this worker
+                        // is about to sleep as a core worker or has just been
+                        // scaled out of the core set. A worker that is already
+                        // uncounted (parked surplus worker re-parking) must not
+                        // decrement again.
+                        if self.counted {
+                            if !self.core.mark_sleep() {
+                                return false;
+                            }
+                            self.counted = false;
+                            if !eligible {
+                                // This worker was counted as an available
+                                // puller until just now, so `ensure_workers`
+                                // may have skipped waking a core worker for a
+                                // task pushed in the meantime. Abort the park
+                                // and hand off outside the park lock: the
+                                // scale-down may have raced with registration
+                                // in `Local::new` or with this worker running
+                                // a task, and nothing else re-checks the queue.
+                                scaled_out = true;
+                                return false;
+                            }
+                        } else if self.core.is_shutdown() {
+                            // `mark_sleep` doubles as the shutdown check for
+                            // counted workers. An uncounted worker must check
+                            // explicitly, or it could park after `mark_shutdown`
+                            // has already run `unpark_all` and never wake up.
                             return false;
                         }
-                        marked_sleep = true;
                         // If this thread is above core_thread_count, go to sleep
                         // without popping so scaled-down threads don't keep working.
-                        if id > self.core.config.core_thread_count.load(Ordering::Acquire) {
+                        if !eligible {
                             return true;
                         }
                         fail_point!("worker-pop-or-sleep-before-validate-pop");
@@ -400,12 +467,14 @@ impl<T: TaskCell + Send> Local<T> {
                 )
             };
 
-            // mark_sleep decreases the active worker count before the park
-            // decision is finalized. Whether the thread actually slept,
-            // timed out, was unparked, or aborted the park from validate, the
-            // worker is running again after park returns, so restore the count.
-            if marked_sleep {
+            // The worker is running again after park returns, whether it slept,
+            // timed out, was unparked, or aborted the park from validate. Rejoin
+            // the active set only if it is eligible to pop *now*: a worker that
+            // is (still or newly) above the core line stays uncounted so that
+            // `ensure_workers` keeps waking real core workers.
+            if !self.counted && id <= self.core.config.core_thread_count.load(Ordering::Acquire) {
                 self.core.mark_woken();
+                self.counted = true;
             }
 
             if self.core.is_shutdown() {
@@ -423,6 +492,14 @@ impl<T: TaskCell + Send> Local<T> {
             // change its timeout after validate has started.
             if next_timeout.is_some() {
                 timeout = next_timeout;
+                continue;
+            }
+
+            if scaled_out {
+                // Now that this worker has left the active set, let a core
+                // worker pick up anything that was pushed while it was still
+                // counted, then park without popping like any surplus worker.
+                self.core.ensure_workers(id);
                 continue;
             }
 
